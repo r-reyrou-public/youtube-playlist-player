@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>YouTube Playlist Player</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <input id="plInput" placeholder="プレイリストURL または ID">
+  <button id="loadBtn">読み込み</button>
+  <span class="sep"></span>
+  <button data-act="asc">タイトル昇順</button>
+  <button data-act="desc">タイトル降順</button>
+  <button data-act="shuffle">シャッフル</button>
+  <button data-act="reset">元に戻す</button>
+  <span class="sep"></span>
+  <button id="writeBtn" class="danger">YouTubeへ書き戻し</button>
+  <span id="status"></span>
+  <div id="menuWrap">
+    <button id="menuBtn" aria-label="メニュー" title="メニュー">☰</button>
+    <div id="menu" hidden>
+      <button id="openSettings">設定</button>
+      <button id="openHelp">ヘルプ</button>
+    </div>
+  </div>
+</header>
+<dialog id="settingsDlg">
+  <h3>設定</h3>
+  <label>起動時の表示モード
+    <select id="setMode"><option value="video">動画モード</option><option value="music">音楽モード</option></select>
+  </label>
+  <label><input type="checkbox" id="setLoop"> 最後まで再生したら先頭に戻る（ループ）</label>
+  <div class="dlgBtns"><button id="settingsClose">閉じる</button></div>
+</dialog>
+<dialog id="helpDlg">
+  <h3>ヘルプ</h3>
+  <table>
+    <tr><td>バージョン</td><td id="helpVer">-</td></tr>
+    <tr><td>Git リポジトリ</td><td id="helpRepo">-</td></tr>
+  </table>
+  <div class="dlgBtns"><button id="helpClose">閉じる</button></div>
+</dialog>
+<main>
+  <section id="stage" class="video-mode">
+    <div id="modeBar">
+      <button id="modeVideo" class="active">動画モード</button>
+      <button id="modeMusic">音楽モード</button>
+    </div>
+    <div id="musicUi">
+      <img id="musicThumb" alt="">
+      <div id="musicTitle">-</div>
+      <div class="controls">
+        <button id="prevBtn">⏮</button>
+        <button id="playBtn">⏯</button>
+        <button id="nextBtn">⏭</button>
+      </div>
+      <input id="seek" type="range" min="0" max="1000" value="0">
+      <div id="times">0:00 / 0:00</div>
+    </div>
+    <div id="playerBox"><div id="player"></div></div>
+  </section>
+  <section id="listPane"><ul id="list"></ul></section>
+</main>
+<script src="https://www.youtube.com/iframe_api"></script>
+<script src="app.js"></script>
+</body>
+</html>
