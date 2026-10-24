@@ -10,15 +10,33 @@ let nowPlaylistId = null, nowVideoId = null;   // 再生中（並べ替えても
 
 function status(msg) { $("status").textContent = msg; }
 
+const CALL_LIMIT_MS = 200000;   // バックエンドの上限（認可待ち180秒）を超えたら画面側で打ち切る
+let busy = 0;
+
+function setBusy(on) {
+  busy += on ? 1 : -1;
+  document.querySelectorAll("header button[id], header [data-act]").forEach((b) => { if (!b.closest("#menu") && b.id !== "menuBtn") b.disabled = busy > 0; });
+}
+
 async function call(cmd, args) {
-  status("処理中...");
+  const t0 = Date.now();
+  const tick = () => status(`処理中... ${Math.floor((Date.now() - t0) / 1000)}秒`);
+  tick();
+  const timer = setInterval(tick, 1000);
+  setBusy(true);
   try {
-    const data = await invoke(cmd, args);
+    const data = await Promise.race([
+      invoke(cmd, args),
+      new Promise((_, rej) => setTimeout(() => rej("応答がありません（タイムアウト）。もう一度お試しください。"), CALL_LIMIT_MS)),
+    ]);
     status("");
     return data;
   } catch (e) {
     status(String(e)); alert(e);
     return null;
+  } finally {
+    clearInterval(timer);
+    setBusy(false);
   }
 }
 
@@ -36,6 +54,7 @@ function renderTree() {
     head.querySelector(".name").textContent = s.title;
     head.querySelector(".cnt").textContent = s.item_count;
     head.addEventListener("click", () => toggle(s.id));
+    head.addEventListener("contextmenu", (e) => { e.preventDefault(); showCtx(e.clientX, e.clientY, s); });
     head.addEventListener("dblclick", () => call("open_editor", { playlistId: s.id, title: s.title }));
     li.appendChild(head);
     if (expanded.has(s.id)) li.appendChild(renderChildren(s.id));
@@ -64,6 +83,33 @@ function renderChildren(id) {
   return box;
 }
 
+// ---- 右クリックメニュー（一覧から削除） ----
+let ctxTarget = null;
+function showCtx(x, y, summary) {
+  ctxTarget = summary;
+  const m = $("ctxMenu");
+  m.hidden = false;
+  m.style.left = `${Math.min(x, window.innerWidth - m.offsetWidth - 4)}px`;
+  m.style.top = `${Math.min(y, window.innerHeight - m.offsetHeight - 4)}px`;
+}
+const hideCtx = () => { $("ctxMenu").hidden = true; };
+document.addEventListener("click", hideCtx);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideCtx(); });
+window.addEventListener("blur", hideCtx);
+$("ctxRemove").onclick = async () => {
+  const s = ctxTarget;
+  hideCtx();
+  if (!s) return;
+  if (!confirm(`「${s.title}」をこのアプリの一覧から削除します。
+YouTube 上のプレイリストは削除されません（「マイリスト取得」で再び表示されます）。`)) return;
+  const list = await call("remove_playlist", { playlistId: s.id });
+  if (!list) return;
+  summaries = list;
+  delete cache[s.id];
+  expanded.delete(s.id);
+  renderTree();
+};
+
 async function toggle(id) {
   if (expanded.has(id)) { expanded.delete(id); renderTree(); return; }
   expanded.add(id);
@@ -78,10 +124,37 @@ async function toggle(id) {
 // 並べ替えウィンドウでの変更・書き戻しを反映（キャッシュ再取得のみ。API通信なし）
 listen("playlist-changed", async (e) => {
   const id = e.payload;
-  if (!cache[id]) return;
-  cache[id] = await invoke("get_playlist", { playlistId: id });
-  renderTree();
+  if (cache[id]) {
+    cache[id] = await invoke("get_playlist", { playlistId: id });
+    renderTree();
+  }
+  refreshPush();
 });
+
+// ---- Push: 手元の変更を YouTube へ反映 ----
+async function refreshPush() {
+  const list = await invoke("pending_summary");
+  const total = list.reduce((n, p) => n + p.count, 0);
+  $("pushBtn").textContent = `Push (${total})`;
+  return { list, total };
+}
+
+$("pushBtn").onclick = async () => {
+  const { list, total } = await refreshPush();
+  if (!total) { alert("YouTube へ反映する変更はありません。"); return; }
+  const lines = list.map((p) => `・${p.title}: ${p.count}件`).join("\n");
+  const warn = total * 50 > 10000 ? "\n\n⚠ 1日の API 上限（10,000ユニット）を超えます。途中で失敗する可能性があります。" : "";
+  if (!confirm(`次の変更を YouTube に反映します（約${total * 50}ユニット消費）。\n\n${lines}${warn}\n\n対象は「手動並べ替え」設定のプレイリストです。続行しますか？`)) return;
+  let done = 0;
+  for (const p of list) {
+    const r = await call("write_back", { playlistId: p.id });
+    if (!r) { await refreshPush(); return; }   // 失敗したらそこで中断（エラーは表示済み）
+    done += r.updated;
+    if (cache[p.id]) { cache[p.id] = r.state; renderTree(); }
+  }
+  await refreshPush();
+  status(`${done}件をYouTubeへ反映しました`);
+};
 
 $("addBtn").onclick = async () => {
   const list = await call("add_playlist", { playlistInput: $("plInput").value });
@@ -175,7 +248,29 @@ $("menuBtn").onclick = (e) => { e.stopPropagation(); menu.hidden = !menu.hidden;
 document.addEventListener("click", () => { menu.hidden = true; });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") menu.hidden = true; });
 
-$("openSettings").onclick = () => $("settingsDlg").showModal();
+async function refreshCred() {
+  const st = await invoke("credentials_status");
+  $("credState").textContent = st.configured ? "（設定済み）" : "（未設定）";
+  $("credState").className = st.configured ? "ok" : "ng";
+  $("credDir").textContent = `保存先: ${st.dir}\\client_secret.json`;
+}
+$("credSave").onclick = async () => {
+  const st = await call("save_credentials", { clientId: $("credId").value, clientSecret: $("credSecret").value });
+  if (!st) return;
+  $("credSecret").value = "";   // シークレットは画面に残さない
+  await refreshCred();
+  alert("保存しました。「マイリスト取得」でログインしてください。");
+};
+$("credClear").onclick = async () => {
+  if (!confirm("保存済みのログイン情報を削除します。次回アクセス時に再度ブラウザで認可します。よろしいですか？")) return;
+  if (await call("clear_auth") !== null) status("認可をリセットしました");
+};
+$("credConsole").onclick = () => invoke("open_url", { url: "https://console.cloud.google.com/apis/credentials" });
+// 手順内のリンクは既定のブラウザで開く
+document.querySelectorAll("a[data-url]").forEach((a) =>
+  a.addEventListener("click", (e) => { e.preventDefault(); invoke("open_url", { url: a.dataset.url }); }));
+
+$("openSettings").onclick = () => { refreshCred(); $("settingsDlg").showModal(); };
 $("settingsClose").onclick = () => $("settingsDlg").close();
 $("helpClose").onclick = () => $("helpDlg").close();
 $("openHelp").onclick = async () => {

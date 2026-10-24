@@ -87,10 +87,13 @@ impl Playlist {
         updates
     }
 
-    /// 書き戻し成功後、現在の並びを新しい基準位置にする。
-    pub fn commit(&mut self) {
+    /// 書き戻し済みの並び（playlist_item_id の順）を、サーバー側の新しい基準位置として記録する。
+    /// 書き戻し中に別ウィンドウで並べ替えられても、サーバーと一致する基準を保てる。
+    pub fn commit_order(&mut self, order: &[String]) {
         for item in &mut self.items {
-            item.original_position = item.current_position;
+            if let Some(i) = order.iter().position(|id| *id == item.playlist_item_id) {
+                item.original_position = i;
+            }
         }
     }
 }
@@ -148,6 +151,17 @@ mod tests {
                 assert_eq!(apply(&pl), want);
             }
         }
+    }
+
+    #[test]
+    fn commit_order_keeps_edits_made_during_write_back() {
+        let mut pl = make(4);
+        pl.move_item(3, 0).unwrap();
+        let sent: Vec<String> = pl.items.iter().map(|i| i.playlist_item_id.clone()).collect();
+        pl.move_item(1, 2).unwrap(); // 書き戻し中の追加編集
+        pl.commit_order(&sent);
+        // サーバーは sent の並び。追加編集分だけが未反映として残る
+        assert_eq!(pl.pending_updates().len(), 1);
     }
 
     #[test]

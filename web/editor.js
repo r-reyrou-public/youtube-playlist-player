@@ -8,15 +8,33 @@ let dragFrom = null;
 
 function status(msg) { $("status").textContent = msg; }
 
+const CALL_LIMIT_MS = 200000;   // バックエンドの上限（認可待ち180秒）を超えたら画面側で打ち切る
+let busy = 0;
+
+function setBusy(on) {
+  busy += on ? 1 : -1;
+  document.querySelectorAll("header button[id], header [data-act]").forEach((b) => { if (!b.closest("#menu") && b.id !== "menuBtn") b.disabled = busy > 0; });
+}
+
 async function call(cmd, args) {
-  status("処理中...");
+  const t0 = Date.now();
+  const tick = () => status(`処理中... ${Math.floor((Date.now() - t0) / 1000)}秒`);
+  tick();
+  const timer = setInterval(tick, 1000);
+  setBusy(true);
   try {
-    const data = await invoke(cmd, { playlistId, ...args });
+    const data = await Promise.race([
+      invoke(cmd, { playlistId, ...args }),
+      new Promise((_, rej) => setTimeout(() => rej("応答がありません（タイムアウト）。もう一度お試しください。"), CALL_LIMIT_MS)),
+    ]);
     status("");
     return data;
   } catch (e) {
     status(String(e)); alert(e);
     return null;
+  } finally {
+    clearInterval(timer);
+    setBusy(false);
   }
 }
 
@@ -73,3 +91,9 @@ $("writeBtn").onclick = async () => {
   const s = await call("get_playlist");
   if (s) setState(s);
 })();
+
+// 書き戻しが途中で失敗した場合などに、最新の状態へ追従する
+listen("playlist-changed", async (e) => {
+  if (e.payload !== playlistId) return;
+  try { setState(await invoke("get_playlist", { playlistId })); } catch (_) {}
+});

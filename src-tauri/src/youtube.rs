@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -15,6 +16,26 @@ use crate::model::{Playlist, PlaylistItem};
 const SCOPE: &str = "https://www.googleapis.com/auth/youtube";
 const API: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
 const PLAYLISTS: &str = "https://www.googleapis.com/youtube/v3/playlists";
+
+/// 接続確立の上限。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 1リクエスト全体（送信〜本文受信）の上限。
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// 保存済みトークンの更新（Silent Refresh）の上限。
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+/// 初回認可（ブラウザ操作待ち）の上限。
+const AUTH_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// 通信エラーを利用者向けのメッセージにする。
+fn net_err(e: reqwest::Error) -> String {
+    if e.is_timeout() {
+        format!("通信がタイムアウトしました（{}秒）。ネットワーク接続を確認して再試行してください。", REQUEST_TIMEOUT.as_secs())
+    } else if e.is_connect() {
+        "YouTube に接続できませんでした。ネットワーク接続を確認してください。".to_string()
+    } else {
+        e.to_string()
+    }
+}
 
 /// URL または ID 文字列から playlistId を取り出す。
 pub fn parse_playlist_id(text: &str) -> String {
@@ -50,6 +71,54 @@ fn base_dir() -> Result<PathBuf, String> {
         })
 }
 
+/// 認証情報の保存先: 既存の client_secret.json の場所、なければ exe のフォルダ。
+pub fn storage_dir() -> PathBuf {
+    base_dir().unwrap_or_else(|_| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(PathBuf::from))
+            .unwrap_or_default()
+    })
+}
+
+pub fn credentials_configured() -> bool {
+    base_dir().is_ok()
+}
+
+/// 画面から入力されたクライアントID/シークレットを client_secret.json（デスクトップアプリ形式）として保存。
+pub fn save_credentials(client_id: &str, client_secret: &str) -> Result<PathBuf, String> {
+    let (id, secret) = (client_id.trim(), client_secret.trim());
+    if id.is_empty() || secret.is_empty() {
+        return Err("クライアントIDとクライアントシークレットを両方入力してください".into());
+    }
+    if !id.ends_with(".apps.googleusercontent.com") {
+        return Err("クライアントIDの形式が正しくありません（…apps.googleusercontent.com で終わる文字列）".into());
+    }
+    let dir = storage_dir();
+    let json = json!({ "installed": {
+        "client_id": id,
+        "client_secret": secret,
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        "redirect_uris": ["http://localhost"],
+    }});
+    let path = dir.join("client_secret.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).map_err(|e| e.to_string())?;
+    // 別のクライアントで取得した古いトークンは使えないため破棄する
+    let _ = std::fs::remove_file(dir.join("token.json"));
+    Ok(dir)
+}
+
+/// 保存済みトークンを削除（次回アクセス時に再認可）。
+pub fn clear_token() -> Result<(), String> {
+    match std::fs::remove_file(storage_dir().join("token.json")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 struct BrowserDelegate;
 
 impl InstalledFlowDelegate for BrowserDelegate {
@@ -72,9 +141,17 @@ pub struct PlaylistSummary {
     pub item_count: usize,
 }
 
+#[derive(Clone)]
 pub struct YouTube {
     auth: DefaultAuthenticator,
     http: reqwest::Client,
+    token_path: PathBuf,
+}
+
+/// 書き戻しの結果。途中で失敗した場合は done 件まで反映済み。
+pub struct WriteOutcome {
+    pub done: usize,
+    pub error: Option<String>,
 }
 
 impl YouTube {
@@ -89,17 +166,31 @@ impl YouTube {
             .build()
             .await
             .map_err(|e| e.to_string())?;
-        Ok(Self { auth, http: reqwest::Client::new() })
+        let http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|e| e.to_string())?;
+        Ok(Self { auth, http, token_path: dir.join("token.json") })
     }
 
     async fn bearer(&self) -> Result<String, String> {
-        let tok = self.auth.token(&[SCOPE]).await.map_err(|e| e.to_string())?;
+        // トークン未保存なら初回認可（ブラウザ操作待ち）なので長め、保存済みなら更新通信だけなので短め
+        let (limit, what) = if self.token_path.exists() {
+            (REFRESH_TIMEOUT, "ログイン情報の更新がタイムアウトしました。ネットワーク接続を確認してください。")
+        } else {
+            (AUTH_TIMEOUT, "ブラウザでの認可が完了しませんでした（タイムアウト）。もう一度お試しください。")
+        };
+        let tok = tokio::time::timeout(limit, self.auth.token(&[SCOPE]))
+            .await
+            .map_err(|_| what.to_string())?
+            .map_err(|e| e.to_string())?;
         tok.token().map(str::to_string).ok_or_else(|| "アクセストークンを取得できません".into())
     }
 
     async fn check(resp: reqwest::Response) -> Result<Value, String> {
         let status = resp.status();
-        let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let body: Value = resp.json().await.map_err(net_err)?;
         if status.is_success() {
             Ok(body)
         } else {
@@ -116,7 +207,7 @@ impl YouTube {
             .query(query)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(net_err)?;
         Self::check(resp).await
     }
 
@@ -191,35 +282,37 @@ impl YouTube {
         Ok(Playlist::new(playlist_id.to_string(), title.to_string(), items))
     }
 
-    /// 差分のみ playlistItems.update で更新。更新件数を返す。
-    pub async fn write_back(&self, playlist: &mut Playlist) -> Result<usize, String> {
-        let updates: Vec<(String, String, usize)> = playlist
-            .pending_updates()
-            .into_iter()
-            .map(|(i, p)| (i.playlist_item_id.clone(), i.video_id.clone(), p))
-            .collect();
+    /// 差分を playlistItems.update で順に反映する。(playlist_item_id, video_id, 新position)
+    pub async fn write_back(&self, playlist_id: &str, updates: Vec<(String, String, usize)>) -> WriteOutcome {
+        let mut done = 0;
         for (id, video_id, position) in &updates {
-            let body = json!({
-                "id": id,
-                "snippet": {
-                    "playlistId": playlist.playlist_id,
-                    "resourceId": { "kind": "youtube#video", "videoId": video_id },
-                    "position": position,
-                }
-            });
-            let resp = self
-                .http
-                .put(API)
-                .bearer_auth(self.bearer().await?)
-                .query(&[("part", "snippet")])
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-            Self::check(resp).await?;
+            if let Err(error) = self.update_one(playlist_id, id, video_id, *position).await {
+                return WriteOutcome { done, error: Some(error) };
+            }
+            done += 1;
         }
-        playlist.commit();
-        Ok(updates.len())
+        WriteOutcome { done, error: None }
+    }
+
+    async fn update_one(&self, playlist_id: &str, id: &str, video_id: &str, position: usize) -> Result<(), String> {
+        let body = json!({
+            "id": id,
+            "snippet": {
+                "playlistId": playlist_id,
+                "resourceId": { "kind": "youtube#video", "videoId": video_id },
+                "position": position,
+            }
+        });
+        let resp = self
+            .http
+            .put(API)
+            .bearer_auth(self.bearer().await?)
+            .query(&[("part", "snippet")])
+            .json(&body)
+            .send()
+            .await
+            .map_err(net_err)?;
+        Self::check(resp).await.map(|_| ())
     }
 }
 

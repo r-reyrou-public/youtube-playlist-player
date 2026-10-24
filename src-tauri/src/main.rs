@@ -19,13 +19,6 @@ struct Inner {
 }
 
 impl Inner {
-    async fn client(&mut self) -> Result<&YouTube, String> {
-        if self.client.is_none() {
-            self.client = Some(YouTube::connect().await?); // 初回はブラウザで認可
-        }
-        Ok(self.client.as_ref().unwrap())
-    }
-
     fn upsert_summary(&mut self, s: PlaylistSummary) {
         match self.summaries.iter_mut().find(|x| x.id == s.id) {
             Some(x) => *x = s,
@@ -36,6 +29,22 @@ impl Inner {
 
 type App<'a> = State<'a, Mutex<Inner>>;
 
+/// 接続（クライアント生成）を直列化するためのロック。通信中の共有状態ロックとは別にしてある。
+#[derive(Default)]
+struct ConnectLock(Mutex<()>);
+
+/// 接続済みクライアントを返す（未接続なら生成）。共有状態のロックは通信中に保持しない。
+async fn client(app: &App<'_>, conn: &State<'_, ConnectLock>) -> Result<YouTube, String> {
+    let _serial = conn.0.lock().await;
+    let existing = app.lock().await.client.clone();
+    if let Some(c) = existing {
+        return Ok(c);
+    }
+    let c = YouTube::connect().await?;
+    app.lock().await.client = Some(c.clone());
+    Ok(c)
+}
+
 /// 並べ替え・書き戻しの結果を他ウィンドウへ通知する。
 fn notify(handle: &AppHandle, playlist_id: &str) {
     let _ = handle.emit("playlist-changed", playlist_id.to_string());
@@ -43,9 +52,10 @@ fn notify(handle: &AppHandle, playlist_id: &str) {
 
 /// 自分のプレイリスト一覧を取得（playlists.list: 1ユニット/50件）。手動追加分は保持する。
 #[tauri::command]
-async fn list_my_playlists(app: App<'_>) -> Result<Vec<PlaylistSummary>, String> {
+async fn list_my_playlists(app: App<'_>, conn: State<'_, ConnectLock>) -> Result<Vec<PlaylistSummary>, String> {
+    let c = client(&app, &conn).await?;
+    let mine = c.my_playlists().await?; // 通信中は共有状態をロックしない
     let mut g = app.lock().await;
-    let mine = g.client().await?.my_playlists().await?;
     for s in mine {
         g.upsert_summary(s);
     }
@@ -54,29 +64,37 @@ async fn list_my_playlists(app: App<'_>) -> Result<Vec<PlaylistSummary>, String>
 
 /// URL または ID でプレイリストを一覧へ追加。
 #[tauri::command]
-async fn add_playlist(app: App<'_>, playlist_input: String) -> Result<Vec<PlaylistSummary>, String> {
+async fn add_playlist(
+    app: App<'_>,
+    conn: State<'_, ConnectLock>,
+    playlist_input: String,
+) -> Result<Vec<PlaylistSummary>, String> {
     let id = youtube::parse_playlist_id(&playlist_input);
+    let c = client(&app, &conn).await?;
+    let s = c.playlist_summary(&id).await?;
     let mut g = app.lock().await;
-    let s = g.client().await?.playlist_summary(&id).await?;
     g.upsert_summary(s);
     Ok(g.summaries.clone())
 }
 
 /// 動画一覧を返す。未取得なら playlistItems.list で取得（1ユニット/50件）、取得済みならキャッシュ。
 #[tauri::command]
-async fn get_playlist(app: App<'_>, playlist_id: String) -> Result<Playlist, String> {
-    let mut g = app.lock().await;
-    if !g.playlists.contains_key(&playlist_id) {
-        let title = g
-            .summaries
+async fn get_playlist(app: App<'_>, conn: State<'_, ConnectLock>, playlist_id: String) -> Result<Playlist, String> {
+    let title = {
+        let g = app.lock().await;
+        if let Some(p) = g.playlists.get(&playlist_id) {
+            return Ok(p.clone());
+        }
+        g.summaries
             .iter()
             .find(|s| s.id == playlist_id)
             .map(|s| s.title.clone())
-            .unwrap_or_default();
-        let pl = g.client().await?.fetch_playlist(&playlist_id, &title).await?;
-        g.playlists.insert(playlist_id.clone(), pl);
-    }
-    Ok(g.playlists[&playlist_id].clone())
+            .unwrap_or_default()
+    };
+    let c = client(&app, &conn).await?;
+    let pl = c.fetch_playlist(&playlist_id, &title).await?; // 通信中は共有状態をロックしない
+    let mut g = app.lock().await;
+    Ok(g.playlists.entry(playlist_id).or_insert(pl).clone())
 }
 
 async fn edit(
@@ -128,23 +146,87 @@ async fn pending_count(app: App<'_>, playlist_id: String) -> Result<usize, Strin
 }
 
 #[derive(Serialize)]
+struct PendingPlaylist {
+    id: String,
+    title: String,
+    count: usize,
+}
+
+/// YouTube へ未反映の変更があるプレイリストと、その更新件数（Push 対象）。
+#[tauri::command]
+async fn pending_summary(app: App<'_>) -> Result<Vec<PendingPlaylist>, String> {
+    let g = app.lock().await;
+    let mut out: Vec<PendingPlaylist> = g
+        .playlists
+        .values()
+        .filter_map(|p| {
+            let count = p.pending_updates().len();
+            (count > 0).then(|| PendingPlaylist { id: p.playlist_id.clone(), title: p.title.clone(), count })
+        })
+        .collect();
+    out.sort_by(|a, b| a.title.cmp(&b.title));
+    Ok(out)
+}
+
+#[derive(Serialize)]
 struct WriteResult {
     updated: usize,
     state: Playlist,
 }
 
-/// playlistItems.update で差分のみ書き戻し（1件50ユニット）。
+/// playlistItems.update で差分のみ書き戻し（1件50ユニット）。通信中は共有状態をロックしない。
 #[tauri::command]
 async fn write_back(app: App<'_>, handle: AppHandle, playlist_id: String) -> Result<WriteResult, String> {
+    let (client, updates, order) = {
+        let g = app.lock().await;
+        let client = g.client.clone().ok_or("先にプレイリストを読み込んでください")?;
+        let p = g.playlists.get(&playlist_id).ok_or("プレイリストが読み込まれていません")?;
+        let updates: Vec<(String, String, usize)> = p
+            .pending_updates()
+            .into_iter()
+            .map(|(i, pos)| (i.playlist_item_id.clone(), i.video_id.clone(), pos))
+            .collect();
+        let order: Vec<String> = p.items.iter().map(|i| i.playlist_item_id.clone()).collect();
+        (client, updates, order)
+    };
+    let outcome = client.write_back(&playlist_id, updates).await;
     let mut g = app.lock().await;
-    let Inner { client, playlists, .. } = &mut *g;
-    let client = client.as_ref().ok_or("先にプレイリストを読み込んでください")?;
-    let playlist = playlists
-        .get_mut(&playlist_id)
-        .ok_or("プレイリストが読み込まれていません")?;
-    let updated = client.write_back(playlist).await?;
+    if let Some(e) = outcome.error {
+        if outcome.done > 0 {
+            // 一部だけ反映済み: サーバーの並びが不明なのでキャッシュを破棄し、次回取得し直す
+            g.playlists.remove(&playlist_id);
+            drop(g);
+            notify(&handle, &playlist_id);
+            return Err(format!("{e}\n（{}件まで反映済み。最新の並びを取得し直します）", outcome.done));
+        }
+        return Err(e);
+    }
+    let p = g.playlists.get_mut(&playlist_id).ok_or("プレイリストが読み込まれていません")?;
+    p.commit_order(&order);
+    let state = p.clone();
+    drop(g);
     notify(&handle, &playlist_id);
-    Ok(WriteResult { updated, state: playlist.clone() })
+    Ok(WriteResult { updated: outcome.done, state })
+}
+
+/// 一覧からプレイリストを外す（このアプリ内の管理のみ。YouTube 上のプレイリストは削除しない）。
+#[tauri::command]
+async fn remove_playlist(app: App<'_>, handle: AppHandle, playlist_id: String) -> Result<Vec<PlaylistSummary>, String> {
+    let list = {
+        let mut g = app.lock().await;
+        g.summaries.retain(|s| s.id != playlist_id);
+        g.playlists.remove(&playlist_id);
+        g.summaries.clone()
+    };
+    // 開いている並べ替えウィンドウがあれば閉じる
+    let safe: String = playlist_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if let Some(w) = handle.get_webview_window(&format!("editor-{safe}")) {
+        let _ = w.close();
+    }
+    Ok(list)
 }
 
 /// 並べ替え専用ウィンドウを開く（既に開いていれば前面へ）。
@@ -164,6 +246,40 @@ async fn open_editor(handle: AppHandle, playlist_id: String, title: String) -> R
         .use_https_scheme(true)
         .build()
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct CredentialsStatus {
+    configured: bool,
+    dir: String,
+}
+
+fn credentials_status_now() -> CredentialsStatus {
+    CredentialsStatus {
+        configured: youtube::credentials_configured(),
+        dir: youtube::storage_dir().display().to_string(),
+    }
+}
+
+#[tauri::command]
+fn credentials_status() -> CredentialsStatus {
+    credentials_status_now()
+}
+
+/// クライアントID/シークレットを保存。接続済みクライアントは破棄し、次回アクセス時に再認可する。
+#[tauri::command]
+async fn save_credentials(app: App<'_>, client_id: String, client_secret: String) -> Result<CredentialsStatus, String> {
+    youtube::save_credentials(&client_id, &client_secret)?;
+    app.lock().await.client = None;
+    Ok(credentials_status_now())
+}
+
+/// 保存済みの認可（token.json）を削除。
+#[tauri::command]
+async fn clear_auth(app: App<'_>) -> Result<(), String> {
+    youtube::clear_token()?;
+    app.lock().await.client = None;
     Ok(())
 }
 
@@ -193,6 +309,7 @@ fn open_url(url: String) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .manage(Mutex::new(Inner::default()))
+        .manage(ConnectLock::default())
         .invoke_handler(tauri::generate_handler![
             list_my_playlists,
             add_playlist,
@@ -202,8 +319,13 @@ fn main() {
             move_item,
             reset,
             pending_count,
+            pending_summary,
             write_back,
             open_editor,
+            remove_playlist,
+            credentials_status,
+            save_credentials,
+            clear_auth,
             app_info,
             open_url
         ])

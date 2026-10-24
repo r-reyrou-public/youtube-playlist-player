@@ -1,6 +1,6 @@
 [package]
 name = "youtube-playlist-player"
-version = "0.5.1-alpha"
+version = "0.5.2-alpha"
 edition = "2021"
 repository = "https://github.com/r-reyrou-public/youtube-playlist-player"
 
@@ -11,7 +11,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["custom-protocol"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 yup-oauth2 = "12"
 webbrowser = "1"
