@@ -1,6 +1,6 @@
 {
   "productName": "YouTube Playlist Player",
-  "version": "0.5.0-alpha",
+  "version": "0.5.1-alpha",
   "identifier": "local.youtube.playlistplayer",
   "build": { "frontendDist": "../web" },
   "app": {

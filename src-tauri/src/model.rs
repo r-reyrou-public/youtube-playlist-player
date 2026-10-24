@@ -16,13 +16,14 @@ pub struct PlaylistItem {
 #[derive(Clone, Serialize)]
 pub struct Playlist {
     pub playlist_id: String,
+    pub title: String,
     pub items: Vec<PlaylistItem>,
 }
 
 impl Playlist {
-    pub fn new(playlist_id: String, mut items: Vec<PlaylistItem>) -> Self {
+    pub fn new(playlist_id: String, title: String, mut items: Vec<PlaylistItem>) -> Self {
         items.sort_by_key(|i| i.original_position);
-        let mut p = Playlist { playlist_id, items };
+        let mut p = Playlist { playlist_id, title, items };
         p.renumber();
         p
     }
@@ -101,6 +102,7 @@ mod tests {
     fn make(n: usize) -> Playlist {
         Playlist::new(
             "PL".into(),
+            "T".into(),
             (0..n)
                 .map(|k| PlaylistItem {
                     playlist_item_id: format!("i{k}"),

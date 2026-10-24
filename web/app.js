@@ -1,10 +1,12 @@
-let state = { playlist_id: null, items: [] };
-let player = null, playerReady = false;
-let nowVideoId = null;      // 再生中の video_id（並べ替えても追従）
-let dragFrom = null;
-
-const $ = (id) => document.getElementById(id);
 const invoke = window.__TAURI__.core.invoke;
+const listen = window.__TAURI__.event.listen;
+const $ = (id) => document.getElementById(id);
+
+let summaries = [];          // [{id, title, item_count}]
+const cache = {};            // playlist_id -> Playlist（展開済みのみ）
+const expanded = new Set();
+let player = null, playerReady = false;
+let nowPlaylistId = null, nowVideoId = null;   // 再生中（並べ替えても video_id で追従）
 
 function status(msg) { $("status").textContent = msg; }
 
@@ -20,58 +22,74 @@ async function call(cmd, args) {
   }
 }
 
-function setState(s) { state = s; render(); refreshPending(); }
-
-async function refreshPending() {
-  const n = await invoke("pending_count");
-  $("writeBtn").textContent = `YouTubeへ書き戻し (${n}件 / ${n * 50}ユニット)`;
+// ---- 左ペイン: プレイリストのツリー ----
+function renderTree() {
+  const ul = $("tree");
+  ul.innerHTML = "";
+  for (const s of summaries) {
+    const li = document.createElement("li");
+    const head = document.createElement("div");
+    head.className = "plname";
+    head.title = "クリックで展開 / ダブルクリックで並べ替えウィンドウ";
+    head.innerHTML = '<span class="arrow"></span><span class="name"></span><span class="cnt"></span>';
+    head.querySelector(".arrow").textContent = expanded.has(s.id) ? "▼" : "▶";
+    head.querySelector(".name").textContent = s.title;
+    head.querySelector(".cnt").textContent = s.item_count;
+    head.addEventListener("click", () => toggle(s.id));
+    head.addEventListener("dblclick", () => call("open_editor", { playlistId: s.id, title: s.title }));
+    li.appendChild(head);
+    if (expanded.has(s.id)) li.appendChild(renderChildren(s.id));
+    ul.appendChild(li);
+  }
 }
 
-function render() {
-  const ul = $("list");
-  ul.innerHTML = "";
-  state.items.forEach((it, idx) => {
+function renderChildren(id) {
+  const box = document.createElement("div");
+  box.className = "children";
+  const pl = cache[id];
+  if (!pl) { box.innerHTML = '<div class="msg">読み込み中...</div>'; return box; }
+  const ul = document.createElement("ul");
+  ul.className = "vlist";
+  pl.items.forEach((it, idx) => {
     const li = document.createElement("li");
-    li.draggable = true;
-    if (it.video_id === nowVideoId) li.classList.add("playing");
-    if (it.current_position !== it.original_position) li.classList.add("changed");
+    if (id === nowPlaylistId && it.video_id === nowVideoId) li.classList.add("playing");
     li.innerHTML = `<span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>`;
     li.querySelector("img").src = it.thumbnail_url;
     li.querySelector(".title").textContent = it.title;
-    li.addEventListener("dblclick", () => playVideo(it.video_id));
-    li.addEventListener("dragstart", () => { dragFrom = idx; });
-    li.addEventListener("dragover", (e) => { e.preventDefault(); li.classList.add("dragover"); });
-    li.addEventListener("dragleave", () => li.classList.remove("dragover"));
-    li.addEventListener("drop", async (e) => {
-      e.preventDefault();
-      if (dragFrom === null || dragFrom === idx) return;
-      const s = await call("move_item", { fromIndex: dragFrom, toIndex: idx });
-      dragFrom = null;
-      if (s) setState(s);
-    });
+    li.title = "ダブルクリックで再生";
+    li.addEventListener("dblclick", () => playVideo(id, it.video_id));
     ul.appendChild(li);
   });
+  box.appendChild(ul);
+  return box;
 }
 
-// ---- ツールバー ----
-$("loadBtn").onclick = async () => {
-  const s = await call("load", { playlistInput: $("plInput").value });
-  if (s) { setState(s); status(`${s.items.length}件を取得`); }
-};
-document.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
-  const a = b.dataset.act;
-  const s = a === "asc" ? await call("sort_title", { descending: false })
-          : a === "desc" ? await call("sort_title", { descending: true })
-          : a === "shuffle" ? await call("shuffle")
-          : await call("reset");
-  if (s) setState(s);
+async function toggle(id) {
+  if (expanded.has(id)) { expanded.delete(id); renderTree(); return; }
+  expanded.add(id);
+  renderTree();
+  if (!cache[id]) {
+    const pl = await call("get_playlist", { playlistId: id });
+    if (pl) cache[id] = pl; else expanded.delete(id);
+    renderTree();
+  }
+}
+
+// 並べ替えウィンドウでの変更・書き戻しを反映（キャッシュ再取得のみ。API通信なし）
+listen("playlist-changed", async (e) => {
+  const id = e.payload;
+  if (!cache[id]) return;
+  cache[id] = await invoke("get_playlist", { playlistId: id });
+  renderTree();
 });
-$("writeBtn").onclick = async () => {
-  const n = await invoke("pending_count");
-  if (!n) { alert("変更はありません。"); return; }
-  if (!confirm(`${n}件を更新します（約${n * 50}ユニット消費）。\nプレイリストが「手動並べ替え」設定であることを確認してください。続行しますか？`)) return;
-  const d = await call("write_back");
-  if (d) { setState(d.state); status(`${d.updated}件を更新しました`); }
+
+$("addBtn").onclick = async () => {
+  const list = await call("add_playlist", { playlistInput: $("plInput").value });
+  if (list) { summaries = list; $("plInput").value = ""; renderTree(); }
+};
+$("myBtn").onclick = async () => {
+  const list = await call("list_my_playlists");
+  if (list) { summaries = list; renderTree(); status(`${list.length}件のプレイリスト`); }
 };
 
 // ---- プレイヤー ----
@@ -87,31 +105,33 @@ window.onYouTubeIframeAPIReady = () => {
   });
 };
 
-function currentIndex() { return state.items.findIndex((i) => i.video_id === nowVideoId); }
+function queue() { return (cache[nowPlaylistId] || { items: [] }).items; }
+function currentIndex() { return queue().findIndex((i) => i.video_id === nowVideoId); }
 
-function playVideo(videoId) {
+function playVideo(playlistId, videoId) {
   if (!playerReady) return;
+  nowPlaylistId = playlistId;
   nowVideoId = videoId;
   player.loadVideoById(videoId);   // 並べ替え後の順序で自前キュー再生（IFrame APIのみ使用）
-  const it = state.items[currentIndex()];
+  const it = queue()[currentIndex()];
   $("musicTitle").textContent = it ? it.title : "";
   $("musicThumb").src = it ? it.thumbnail_url : "";
-  render();
+  renderTree();
 }
 
 function playRelative(d) {
-  if (!state.items.length) return;
+  const q = queue();
+  if (!q.length) return;
   const i = currentIndex();
-  if (!settings.loop && i + d >= state.items.length) return;   // ループ無効なら末尾で停止
-  const n = state.items[(i + d + state.items.length) % state.items.length];
-  playVideo(n.video_id);
+  if (!settings.loop && i + d >= q.length) return;   // ループ無効なら末尾で停止
+  playVideo(nowPlaylistId, q[(i + d + q.length) % q.length].video_id);
 }
 
 $("prevBtn").onclick = () => playRelative(-1);
 $("nextBtn").onclick = () => playRelative(1);
 $("playBtn").onclick = () => {
   if (!playerReady) return;
-  if (nowVideoId === null) { if (state.items.length) playVideo(state.items[0].video_id); return; }
+  if (nowVideoId === null) { const q = Object.values(cache)[0]; if (q && q.items.length) playVideo(q.playlist_id, q.items[0].video_id); return; }
   player.getPlayerState() === YT.PlayerState.PLAYING ? player.pauseVideo() : player.playVideo();
 };
 

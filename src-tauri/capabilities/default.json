@@ -1,5 +1,5 @@
 {
   "identifier": "default",
-  "windows": ["main"],
+  "windows": ["main", "editor-*"],
   "permissions": ["core:default"]
 }

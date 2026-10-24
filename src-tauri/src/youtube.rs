@@ -4,6 +4,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
+use serde::Serialize;
 use serde_json::{json, Value};
 use yup_oauth2::authenticator::DefaultAuthenticator;
 use yup_oauth2::authenticator_delegate::InstalledFlowDelegate;
@@ -13,6 +14,7 @@ use crate::model::{Playlist, PlaylistItem};
 
 const SCOPE: &str = "https://www.googleapis.com/auth/youtube";
 const API: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
+const PLAYLISTS: &str = "https://www.googleapis.com/youtube/v3/playlists";
 
 /// URL または ID 文字列から playlistId を取り出す。
 pub fn parse_playlist_id(text: &str) -> String {
@@ -63,6 +65,13 @@ impl InstalledFlowDelegate for BrowserDelegate {
     }
 }
 
+#[derive(Clone, Serialize)]
+pub struct PlaylistSummary {
+    pub id: String,
+    pub title: String,
+    pub item_count: usize,
+}
+
 pub struct YouTube {
     auth: DefaultAuthenticator,
     http: reqwest::Client,
@@ -99,8 +108,57 @@ impl YouTube {
         }
     }
 
+    async fn get_json(&self, url: &str, query: &[(&str, &str)]) -> Result<Value, String> {
+        let resp = self
+            .http
+            .get(url)
+            .bearer_auth(self.bearer().await?)
+            .query(query)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        Self::check(resp).await
+    }
+
+    /// playlists.list（50件/ページ）。mine=true なら自分のプレイリスト全件、id 指定ならその1件。
+    async fn fetch_summaries(&self, filter: (&str, &str)) -> Result<Vec<PlaylistSummary>, String> {
+        let mut out = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut query = vec![("part", "snippet,contentDetails"), ("maxResults", "50"), filter];
+            if let Some(t) = &page_token {
+                query.push(("pageToken", t));
+            }
+            let body = self.get_json(PLAYLISTS, &query).await?;
+            for it in body["items"].as_array().into_iter().flatten() {
+                out.push(PlaylistSummary {
+                    id: it["id"].as_str().unwrap_or_default().into(),
+                    title: it["snippet"]["title"].as_str().unwrap_or_default().into(),
+                    item_count: it["contentDetails"]["itemCount"].as_u64().unwrap_or(0) as usize,
+                });
+            }
+            page_token = body["nextPageToken"].as_str().map(str::to_string);
+            if page_token.is_none() {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn my_playlists(&self) -> Result<Vec<PlaylistSummary>, String> {
+        self.fetch_summaries(("mine", "true")).await
+    }
+
+    pub async fn playlist_summary(&self, id: &str) -> Result<PlaylistSummary, String> {
+        self.fetch_summaries(("id", id))
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("プレイリストが見つかりません: {id}"))
+    }
+
     /// playlistItems.list（50件/ページ）で全件取得。
-    pub async fn fetch_playlist(&self, playlist_id: &str) -> Result<Playlist, String> {
+    pub async fn fetch_playlist(&self, playlist_id: &str, title: &str) -> Result<Playlist, String> {
         let mut items = Vec::new();
         let mut page_token: Option<String> = None;
         loop {
@@ -112,15 +170,7 @@ impl YouTube {
             if let Some(t) = &page_token {
                 query.push(("pageToken", t));
             }
-            let resp = self
-                .http
-                .get(API)
-                .bearer_auth(self.bearer().await?)
-                .query(&query)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-            let body = Self::check(resp).await?;
+            let body = self.get_json(API, &query).await?;
             for it in body["items"].as_array().into_iter().flatten() {
                 let sn = &it["snippet"];
                 let pos = sn["position"].as_u64().unwrap_or(0) as usize;
@@ -138,7 +188,7 @@ impl YouTube {
                 break;
             }
         }
-        Ok(Playlist::new(playlist_id.to_string(), items))
+        Ok(Playlist::new(playlist_id.to_string(), title.to_string(), items))
     }
 
     /// 差分のみ playlistItems.update で更新。更新件数を返す。

@@ -8,14 +8,8 @@
 <body>
 <header>
   <input id="plInput" placeholder="プレイリストURL または ID">
-  <button id="loadBtn">読み込み</button>
-  <span class="sep"></span>
-  <button data-act="asc">タイトル昇順</button>
-  <button data-act="desc">タイトル降順</button>
-  <button data-act="shuffle">シャッフル</button>
-  <button data-act="reset">元に戻す</button>
-  <span class="sep"></span>
-  <button id="writeBtn" class="danger">YouTubeへ書き戻し</button>
+  <button id="addBtn">追加</button>
+  <button id="myBtn">マイリスト取得</button>
   <span id="status"></span>
   <div id="menuWrap">
     <button id="menuBtn" aria-label="メニュー" title="メニュー">☰</button>
@@ -42,6 +36,7 @@
   <div class="dlgBtns"><button id="helpClose">閉じる</button></div>
 </dialog>
 <main>
+  <aside id="treePane"><ul id="tree"></ul></aside>
   <section id="stage" class="video-mode">
     <div id="modeBar">
       <button id="modeVideo" class="active">動画モード</button>
@@ -60,7 +55,6 @@
     </div>
     <div id="playerBox"><div id="player"></div></div>
   </section>
-  <section id="listPane"><ul id="list"></ul></section>
 </main>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script src="app.js"></script>
