@@ -62,6 +62,8 @@ function renderTree() {
   }
 }
 
+let drag = null;   // ツリー上のドラッグ元 { id, idx }
+
 function renderChildren(id) {
   const box = document.createElement("div");
   box.className = "children";
@@ -72,11 +74,35 @@ function renderChildren(id) {
   pl.items.forEach((it, idx) => {
     const li = document.createElement("li");
     if (id === nowPlaylistId && it.video_id === nowVideoId) li.classList.add("playing");
-    li.innerHTML = `<span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>`;
+    li.innerHTML = `<span class="handle" title="ドラッグして並べ替え">⠿</span><span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>`;
     li.querySelector("img").src = it.thumbnail_url;
     li.querySelector(".title").textContent = it.title;
-    li.title = "ダブルクリックで再生";
+    li.title = "ダブルクリックで再生 / 左のハンドルをドラッグで並べ替え";
+    li.draggable = false;
+    const handle = li.querySelector(".handle");
+    handle.addEventListener("mousedown", () => {
+      li.draggable = true;
+      // ハンドル外で離しても、行全体がドラッグ可能なまま残らないようにする
+      document.addEventListener("mouseup", () => { li.draggable = false; }, { once: true });
+    });
+    li.addEventListener("dragend", () => {
+      drag = null;
+      li.draggable = false;
+      document.querySelectorAll(".dragover").forEach((el) => el.classList.remove("dragover"));
+    });
     li.addEventListener("dblclick", () => playVideo(id, it.video_id));
+    li.addEventListener("dragstart", (e) => { drag = { id, idx }; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(idx)); });
+    li.addEventListener("dragover", (e) => { if (drag && drag.id === id) { e.preventDefault(); li.classList.add("dragover"); } });
+    li.addEventListener("dragleave", () => li.classList.remove("dragover"));
+    li.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      const from = drag;
+      drag = null;
+      if (!from || from.id !== id || from.idx === idx) { renderTree(); return; }
+      const s = await call("move_item", { playlistId: id, fromIndex: from.idx, toIndex: idx });
+      if (s) cache[id] = s;
+      renderTree();
+    });
     ul.appendChild(li);
   });
   box.appendChild(ul);
@@ -250,10 +276,33 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") menu.hidde
 
 async function refreshCred() {
   const st = await invoke("credentials_status");
-  $("credState").textContent = st.configured ? "（設定済み）" : "（未設定）";
+  $("credState").textContent = st.embedded ? "（内蔵クライアント使用中・設定不要です）"
+    : st.configured ? "（設定済み）" : "（未設定）";
   $("credState").className = st.configured ? "ok" : "ng";
   $("credDir").textContent = `保存先: ${st.dir}\\client_secret.json`;
 }
+async function afterImport(st) {
+  if (!st) return;
+  $("credId").value = "";
+  $("credSecret").value = "";
+  await refreshCred();
+  alert("認証情報を保存しました。「マイリスト取得」でログインしてください。");
+}
+async function confirmReplace() {
+  const st = await invoke("credentials_status");
+  if (!st.configured) return true;
+  return confirm("すでに認証情報が設定されています（内蔵クライアントを含む）。\n取り込むと、取り込んだ内容が優先され、保存済みのログイン情報（token.json）は削除されて再ログインが必要になります。続行しますか？");
+}
+$("credAuto").onclick = async () => {
+  if (await confirmReplace()) afterImport(await call("import_downloaded_credentials"));
+};
+$("credFile").onclick = () => $("credFileInput").click();
+$("credFileInput").onchange = async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  if (await confirmReplace()) afterImport(await call("import_credentials_json", { text: await f.text() }));
+};
 $("credSave").onclick = async () => {
   const st = await call("save_credentials", { clientId: $("credId").value, clientSecret: $("credSecret").value });
   if (!st) return;

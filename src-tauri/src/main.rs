@@ -244,6 +244,7 @@ async fn open_editor(handle: AppHandle, playlist_id: String, title: String) -> R
         .title(format!("並べ替え - {title}"))
         .inner_size(680.0, 820.0)
         .use_https_scheme(true)
+        .disable_drag_drop_handler() // 画面内のドラッグ＆ドロップ並べ替えを有効にする
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -252,12 +253,14 @@ async fn open_editor(handle: AppHandle, playlist_id: String, title: String) -> R
 #[derive(Serialize)]
 struct CredentialsStatus {
     configured: bool,
+    embedded: bool,
     dir: String,
 }
 
 fn credentials_status_now() -> CredentialsStatus {
     CredentialsStatus {
         configured: youtube::credentials_configured(),
+        embedded: youtube::using_embedded(),
         dir: youtube::storage_dir().display().to_string(),
     }
 }
@@ -273,6 +276,20 @@ async fn save_credentials(app: App<'_>, client_id: String, client_secret: String
     youtube::save_credentials(&client_id, &client_secret)?;
     app.lock().await.client = None;
     Ok(credentials_status_now())
+}
+
+/// JSON の中身（ファイル選択で読み込んだ文字列）から認証情報を取り込む。
+#[tauri::command]
+async fn import_credentials_json(app: App<'_>, text: String) -> Result<CredentialsStatus, String> {
+    let (id, secret) = youtube::parse_client_json(&text)?;
+    save_credentials(app, id, secret).await
+}
+
+/// ダウンロード フォルダの最新の client_secret*.json から認証情報を取り込む。
+#[tauri::command]
+async fn import_downloaded_credentials(app: App<'_>) -> Result<CredentialsStatus, String> {
+    let text = youtube::read_downloaded_client_json()?;
+    import_credentials_json(app, text).await
 }
 
 /// 保存済みの認可（token.json）を削除。
@@ -325,6 +342,8 @@ fn main() {
             remove_playlist,
             credentials_status,
             save_credentials,
+            import_credentials_json,
+            import_downloaded_credentials,
             clear_auth,
             app_info,
             open_url

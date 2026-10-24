@@ -42,22 +42,29 @@
       <input id="credSecret" type="password" autocomplete="off" placeholder="GOCSPX-...">
     </label>
     <div class="dlgBtns left">
-      <button id="credSave">保存</button>
+      <button id="credAuto" class="primary" title="ダウンロード フォルダの最新の client_secret*.json を読み込みます">ダウンロード済みJSONから自動設定</button>
+      <button id="credFile">JSONファイルを選択…</button>
+      <input id="credFileInput" type="file" accept=".json,application/json" hidden>
+    </div>
+    <div class="dlgBtns left">
+      <button id="credSave">入力した内容を保存</button>
       <button id="credClear" title="保存済みのログイン情報(token.json)を削除し、次回アクセス時に再認可します">認可をリセット</button>
       <button id="credConsole">Google Cloud Console を開く</button>
     </div>
     <div id="credDir"></div>
     <details>
-      <summary>取得手順（クリックで表示）</summary>
+      <summary>自分の OAuth クライアントを使う場合の取得手順（通常は不要）</summary>
       <ol class="steps">
-        <li><a data-url="https://console.cloud.google.com/projectcreate">Google Cloud Console（プロジェクト作成）</a> を開いて Google アカウントでログインし、<b>新しいプロジェクト</b>を作成します。</li>
-        <li><a data-url="https://console.cloud.google.com/apis/library/youtube.googleapis.com">YouTube Data API v3 のページ</a> を開き、<b>有効にする</b>を押します（先ほどのプロジェクトが選択されていることを確認）。</li>
-        <li><b><a data-url="https://console.cloud.google.com/apis/credentials/consent">OAuth 同意画面</a></b> を開き、ユーザーの種類は<b>外部</b>、アプリ名とメールアドレスを入力して保存します。<br>
-            「テストユーザー」に<b>自分の Google アカウント</b>を追加します（公開しない場合はテスト状態のままで構いません。ただしテスト状態では認可が 7 日で失効するため、その際は再認可が必要です）。</li>
-        <li><a data-url="https://console.cloud.google.com/apis/credentials">認証情報ページ</a> で「認証情報を作成」→「<b>OAuth クライアント ID</b>」を選び、アプリケーションの種類に<b>デスクトップ アプリ</b>を選んで作成します。<br><b>「API キー」「サービス アカウント」は不要です</b>（選ぶと API キーの作成画面が開きます。その場合はキャンセルして、OAuth クライアント ID を選び直してください）。</li>
-        <li>作成済みなら、一覧の「デスクトップ クライアント」名をクリックして詳細を開き、<b>クライアント ID</b> と<b>クライアント シークレット</b>を上の欄に入力して「保存」します。シークレットが表示されない場合は、作成時にダウンロードした JSON を使うか、詳細画面の「シークレットを追加」で発行し直してください（<code>client_secret.json</code> として自動保存されます。JSON をダウンロードして同じ場所に置いても構いません）。</li>
-        <li>メイン画面の「マイリスト取得」を押すとブラウザが開きます。アカウントを選び、「このアプリは Google で確認されていません」と出たら<b>詳細 → 続行</b>で許可してください。以後は自動でログインされます。</li>
+        <li><a data-url="https://console.cloud.google.com/flows/enableapi?apiid=youtube.googleapis.com">API の有効化ページ</a> を開き、プロジェクトを選択（なければ新規作成）して<b>「有効にする」</b>。<br>
+            <span class="note">プロジェクト作成と YouTube Data API v3 の有効化が 1 回で済みます。</span></li>
+        <li><a data-url="https://console.cloud.google.com/apis/credentials/consent">OAuth 同意画面</a> を開き、ユーザーの種類は<b>外部</b>、アプリ名とメールアドレスを入力して保存。<b>テストユーザーに自分の Google アカウントを追加</b>します。<br>
+            <span class="note">テスト状態のままで構いません（その場合、認可は 7 日で失効するので再認可が必要です）。</span></li>
+        <li><a data-url="https://console.cloud.google.com/apis/credentials">認証情報ページ</a> で「認証情報を作成」→「<b>OAuth クライアント ID</b>」→ 種類<b>「デスクトップ アプリ」</b>で作成。<br>
+            作成直後のダイアログの<b>「JSON をダウンロード」</b>を押します。<span class="note">（「API キー」「サービス アカウント」は不要です）</span></li>
+        <li>上の<b>「ダウンロード済みJSONから自動設定」</b>を押すだけで完了です（別の場所に保存した場合は「JSONファイルを選択…」）。</li>
+        <li>メイン画面の「マイリスト取得」を押すとブラウザが開きます。「このアプリは Google で確認されていません」と出たら<b>詳細 → 続行</b>で許可します。以後は自動でログインされます。</li>
       </ol>
+      <p class="note">JSON のシークレットが手元にない場合は、認証情報ページでクライアント名をクリックし「シークレットを追加」で発行し直してください。</p>
       <p class="note">API の無料枠は 1 日 10,000 ユニットです。一覧取得は 1 ユニット/50 件、並び順の書き戻しは 50 ユニット/件です。</p>
     </details>
   </fieldset>

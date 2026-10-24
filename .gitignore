@@ -3,3 +3,4 @@ client_secret.json
 src-tauri/target/
 src-tauri/gen/
 /youtube-playlist-player.exe
+demo/

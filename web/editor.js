@@ -46,18 +46,39 @@ async function setState(s) {
   $("writeBtn").textContent = `YouTubeへ書き戻し (${n}件 / ${n * 50}ユニット)`;
 }
 
+async function moveBy(idx, delta) {
+  const s = await call("move_item", { fromIndex: idx, toIndex: idx + delta });
+  if (s) setState(s);
+}
+
 function render() {
   const ul = $("list");
   ul.innerHTML = "";
   state.items.forEach((it, idx) => {
     const li = document.createElement("li");
-    li.draggable = true;
+    li.draggable = false;
     if (it.current_position !== it.original_position) li.classList.add("changed");
-    li.innerHTML = `<span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>`;
+    li.innerHTML = `<span class="handle" title="ドラッグして並べ替え">⠿</span><span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>` +
+      `<span class="mv"><button class="up" title="1つ上へ">▲</button><button class="down" title="1つ下へ">▼</button></span>`;
+    const handle = li.querySelector(".handle");
+    handle.addEventListener("mousedown", () => {
+      li.draggable = true;
+      // ハンドル外で離しても、行全体がドラッグ可能なまま残らないようにする
+      document.addEventListener("mouseup", () => { li.draggable = false; }, { once: true });
+    });
+    li.addEventListener("dragend", () => {
+      dragFrom = null;
+      li.draggable = false;
+      document.querySelectorAll(".dragover").forEach((el) => el.classList.remove("dragover"));
+    });
+    li.querySelector(".up").disabled = idx === 0;
+    li.querySelector(".down").disabled = idx === state.items.length - 1;
+    li.querySelector(".up").onclick = () => moveBy(idx, -1);
+    li.querySelector(".down").onclick = () => moveBy(idx, 1);
     li.querySelector("img").src = it.thumbnail_url;
     li.querySelector(".title").textContent = it.title;
-    li.addEventListener("dragstart", () => { dragFrom = idx; });
-    li.addEventListener("dragover", (e) => { e.preventDefault(); li.classList.add("dragover"); });
+    li.addEventListener("dragstart", (e) => { dragFrom = idx; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(idx)); });
+    li.addEventListener("dragover", (e) => { if (dragFrom === null) return; e.preventDefault(); li.classList.add("dragover"); });
     li.addEventListener("dragleave", () => li.classList.remove("dragover"));
     li.addEventListener("drop", async (e) => {
       e.preventDefault();

@@ -61,6 +61,7 @@ fn base_dir() -> Result<PathBuf, String> {
             }
         }
     }
+    candidates.extend(app_data_dir());
     candidates
         .into_iter()
         .find(|d| d.join("client_secret.json").exists())
@@ -71,18 +72,55 @@ fn base_dir() -> Result<PathBuf, String> {
         })
 }
 
-/// 認証情報の保存先: 既存の client_secret.json の場所、なければ exe のフォルダ。
+/// exe の隣などが書き込み不可（Program Files 等）の場合の保存先。
+fn app_data_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("youtube-playlist-player"))
+}
+
+fn writable(dir: &std::path::Path) -> bool {
+    let probe = dir.join(format!(".write_test_{}", std::process::id()));
+    let ok = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+/// 認証情報の保存先: 既存の client_secret.json の場所 → 書き込める exe のフォルダ → アプリデータ領域。
 pub fn storage_dir() -> PathBuf {
-    base_dir().unwrap_or_else(|_| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(PathBuf::from))
-            .unwrap_or_default()
+    if let Ok(d) = base_dir() {
+        return d;
+    }
+    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(PathBuf::from)) {
+        if writable(&d) {
+            return d;
+        }
+    }
+    let d = app_data_dir().unwrap_or_default();
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+/// ビルド時に埋め込まれた OAuth クライアント（`build.ps1 -Embed` が YT_CLIENT_ID / YT_CLIENT_SECRET を設定）。
+/// 利用者が client_secret.json を置いていない場合に使われ、ログインだけで利用できるようになる。
+fn embedded_secret() -> Option<yup_oauth2::ApplicationSecret> {
+    let id = option_env!("YT_CLIENT_ID").filter(|s| !s.is_empty())?;
+    let secret = option_env!("YT_CLIENT_SECRET").filter(|s| !s.is_empty())?;
+    Some(yup_oauth2::ApplicationSecret {
+        client_id: id.to_string(),
+        client_secret: secret.to_string(),
+        auth_uri: "https://accounts.google.com/o/oauth2/auth".into(),
+        token_uri: "https://oauth2.googleapis.com/token".into(),
+        redirect_uris: vec!["http://localhost".into()],
+        ..Default::default()
     })
 }
 
+/// 利用者の client_secret.json が無く、内蔵クライアントで動作しているか。
+pub fn using_embedded() -> bool {
+    base_dir().is_err() && embedded_secret().is_some()
+}
+
 pub fn credentials_configured() -> bool {
-    base_dir().is_ok()
+    base_dir().is_ok() || embedded_secret().is_some()
 }
 
 /// 画面から入力されたクライアントID/シークレットを client_secret.json（デスクトップアプリ形式）として保存。
@@ -103,11 +141,68 @@ pub fn save_credentials(client_id: &str, client_secret: &str) -> Result<PathBuf,
         "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
         "redirect_uris": ["http://localhost"],
     }});
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("client_secret.json");
     std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).map_err(|e| e.to_string())?;
     // 別のクライアントで取得した古いトークンは使えないため破棄する
     let _ = std::fs::remove_file(dir.join("token.json"));
     Ok(dir)
+}
+
+/// Google Cloud Console からダウンロードしたクライアント JSON から (client_id, client_secret) を取り出す。
+pub fn parse_client_json(text: &str) -> Result<(String, String), String> {
+    let v: Value = serde_json::from_str(text).map_err(|_| "JSON として読み取れません".to_string())?;
+    if let Some(c) = v.get("installed") {
+        let get = |k: &str| c[k].as_str().map(str::to_string);
+        return match (get("client_id"), get("client_secret")) {
+            (Some(id), Some(secret)) => Ok((id, secret)),
+            _ => Err("client_id / client_secret が含まれていません".into()),
+        };
+    }
+    if v.get("web").is_some() {
+        return Err("種類が「ウェブ アプリケーション」です。「デスクトップ アプリ」で作成し直してください".into());
+    }
+    Err("Google の OAuth クライアント JSON ではありません".into())
+}
+
+/// ダウンロード フォルダにある client_secret*.json のうち、取り込める最新のものの内容を返す。
+pub fn read_downloaded_client_json() -> Result<String, String> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for var in ["USERPROFILE", "OneDrive"] {
+        if let Some(p) = std::env::var_os(var) {
+            dirs.push(PathBuf::from(p).join("Downloads"));
+        }
+    }
+    let mut files: Vec<_> = dirs
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().to_lowercase();
+            n.starts_with("client_secret") && n.ends_with(".json")
+        })
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    if files.is_empty() {
+        return Err("ダウンロード フォルダに client_secret*.json が見つかりません".into());
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut first_err = None;
+    for (_, path) in files {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match parse_client_json(&text) {
+                Ok(_) => return Ok(text),
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            },
+            Err(e) => {
+                first_err.get_or_insert(e.to_string());
+            }
+        }
+    }
+    Err(first_err.unwrap_or_default())
 }
 
 /// 保存済みトークンを削除（次回アクセス時に再認可）。
@@ -156,10 +251,16 @@ pub struct WriteOutcome {
 
 impl YouTube {
     pub async fn connect() -> Result<Self, String> {
-        let dir = base_dir()?;
-        let secret = yup_oauth2::read_application_secret(dir.join("client_secret.json"))
-            .await
-            .map_err(|e| e.to_string())?;
+        // 利用者の client_secret.json を優先し、無ければ内蔵クライアントを使う
+        let (secret, dir) = match base_dir() {
+            Ok(dir) => {
+                let secret = yup_oauth2::read_application_secret(dir.join("client_secret.json"))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                (secret, dir)
+            }
+            Err(e) => (embedded_secret().ok_or(e)?, storage_dir()),
+        };
         let auth = InstalledFlowAuthenticator::builder(secret, InstalledFlowReturnMethod::HTTPRedirect)
             .persist_tokens_to_disk(dir.join("token.json")) // 次回以降は Silent Refresh
             .flow_delegate(Box::new(BrowserDelegate))
@@ -326,7 +427,16 @@ fn best_thumbnail(thumbs: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_playlist_id;
+    use super::{parse_client_json, parse_playlist_id};
+
+    #[test]
+    fn parses_desktop_client_json() {
+        let j = r#"{"installed":{"client_id":"a.apps.googleusercontent.com","client_secret":"GOCSPX-x"}}"#;
+        assert_eq!(parse_client_json(j).unwrap(), ("a.apps.googleusercontent.com".into(), "GOCSPX-x".into()));
+        assert!(parse_client_json(r#"{"web":{"client_id":"a"}}"#).unwrap_err().contains("ウェブ"));
+        assert!(parse_client_json("{}").is_err());
+        assert!(parse_client_json("not json").is_err());
+    }
 
     #[test]
     fn parses_url_and_id() {
