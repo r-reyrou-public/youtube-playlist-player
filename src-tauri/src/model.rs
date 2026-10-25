@@ -21,6 +21,9 @@ pub struct PlaylistItem {
     /// チャンネル名（取得できない動画は空）。
     #[serde(default)]
     pub channel: String,
+    /// チャンネルID（UC... または空）。
+    #[serde(default)]
+    pub channel_id: String,
     /// YouTube 側にまだ無い（Push で追加される）。
     pub is_new: bool,
 }
@@ -33,6 +36,8 @@ pub struct VideoInfo {
     pub thumbnail_url: String,
     #[serde(default)]
     pub channel: String,
+    #[serde(default)]
+    pub channel_url: String,
 }
 
 /// Push で YouTube へ行う1回分の操作（いずれも 50 ユニット）。
@@ -89,6 +94,20 @@ impl Playlist {
     /// 手元だけで作る新規リスト。Push で YouTube に作成される。
     pub fn new_local(playlist_id: String, title: String) -> Self {
         Playlist { playlist_id, remote_id: None, title, items: Vec::new(), fetched_at: 0, server: Vec::new(), removed: Vec::new(), deleted: false }
+    }
+
+    /// YouTube 上の実際の並び（playlist_item_id の順）を取り込む。手元の動画の並びは変えない。
+    pub fn set_server(&mut self, ids: Vec<String>) {
+        self.server = ids;
+        self.refresh();
+    }
+
+    /// YouTube 側にリストが見つからないとき: 未作成の状態に戻す（全動画が「新規」になり、次の Push で作り直される）。
+    pub fn forget_remote(&mut self) {
+        self.remote_id = None;
+        self.server.clear();
+        self.removed.clear();
+        self.refresh();
     }
 
     /// 現在位置・サーバー上の位置・新規フラグを再計算する。
@@ -170,6 +189,7 @@ impl Playlist {
                 current_position: 0,
                 thumbnail_url: video.thumbnail_url,
                 channel: video.channel,
+                channel_id: String::new(),
                 is_new: true,
             },
         };
@@ -296,6 +316,7 @@ mod tests {
             current_position: k,
             thumbnail_url: String::new(),
             channel: format!("C{}", 5 - k % 3),
+            channel_id: String::new(),
             is_new: false,
         }
     }
@@ -305,7 +326,7 @@ mod tests {
     }
 
     fn video(k: usize) -> VideoInfo {
-        VideoInfo { video_id: format!("x{k}"), title: format!("X{k}"), thumbnail_url: String::new(), channel: String::new() }
+        VideoInfo { video_id: format!("x{k}"), title: format!("X{k}"), thumbnail_url: String::new(), channel: String::new(), channel_url: String::new() }
     }
 
     /// 実行時と同じく「先頭の操作を1件ずつ反映」を繰り返す。操作数を返す。
@@ -384,7 +405,7 @@ mod tests {
     fn re_adding_removed_video_restores_it() {
         let mut pl = make(3);
         pl.remove_video("v1");
-        pl.add_video(VideoInfo { video_id: "v1".into(), title: "T1".into(), thumbnail_url: String::new(), channel: String::new() }, "new-1".into(), Some(1));
+        pl.add_video(VideoInfo { video_id: "v1".into(), title: "T1".into(), thumbnail_url: String::new(), channel: String::new(), channel_url: String::new() }, "new-1".into(), Some(1));
         assert!(pl.plan().is_empty(), "削除→再追加は何も送らない");
     }
 
@@ -441,7 +462,7 @@ mod tests {
         let mut b = make(2);
         let it = a.take_item("i1").unwrap();
         b.add_video(
-            VideoInfo { video_id: it.video_id, title: it.title, thumbnail_url: it.thumbnail_url, channel: it.channel },
+            VideoInfo { video_id: it.video_id, title: it.title, thumbnail_url: it.thumbnail_url, channel: it.channel, channel_url: String::new() },
             "new-9".into(),
             Some(1),
         );

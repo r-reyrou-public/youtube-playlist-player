@@ -17,6 +17,7 @@ const SCOPE: &str = "https://www.googleapis.com/auth/youtube";
 const API: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
 const CHANNELS: &str = "https://www.googleapis.com/youtube/v3/channels";
 const PLAYLISTS: &str = "https://www.googleapis.com/youtube/v3/playlists";
+const VIDEOS: &str = "https://www.googleapis.com/youtube/v3/videos";
 
 /// 接続確立の上限。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -49,6 +50,88 @@ pub fn parse_playlist_id(text: &str) -> String {
     }
     text.trim().to_string()
 }
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ChannelQuery {
+    Id(String),
+    Handle(String),
+    Username(String),
+}
+
+/// URL やハンドル名からチャンネルの検索クエリを取り出す。
+pub fn parse_channel_input(input: &str) -> ChannelQuery {
+    let s = input.trim();
+    let no_proto = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
+    let path = if let Some(rest) = no_proto.strip_prefix("www.youtube.com/") {
+        rest
+    } else if let Some(rest) = no_proto.strip_prefix("youtube.com/") {
+        rest
+    } else if let Some(rest) = no_proto.strip_prefix("m.youtube.com/") {
+        rest
+    } else if let Some(rest) = no_proto.strip_prefix("youtu.be/") {
+        rest
+    } else {
+        no_proto
+    };
+
+    let path = path.split(&['?', '#'][..]).next().unwrap_or(path).trim_matches('/');
+
+    if let Some(rest) = path.strip_prefix("channel/") {
+        let id = rest.split('/').next().unwrap_or(rest);
+        return ChannelQuery::Id(id.to_string());
+    }
+
+    if let Some(rest) = path.strip_prefix("user/") {
+        let user = rest.split('/').next().unwrap_or(rest);
+        return ChannelQuery::Username(user.to_string());
+    }
+
+    if let Some(rest) = path.strip_prefix("c/") {
+        let c = rest.split('/').next().unwrap_or(rest);
+        return ChannelQuery::Handle(if c.starts_with('@') { c.to_string() } else { format!("@{c}") });
+    }
+
+    if let Some(idx) = path.find('@') {
+        let rest = &path[idx..];
+        let handle = rest.split('/').next().unwrap_or(rest);
+        return ChannelQuery::Handle(handle.to_string());
+    }
+
+    if (path.starts_with("UC") || path.starts_with("HC")) && path.len() >= 20 && !path.contains('/') {
+        return ChannelQuery::Id(path.to_string());
+    }
+
+    if s.starts_with('@') {
+        let h = s.split(&['/', '?', '#'][..]).next().unwrap_or(s);
+        return ChannelQuery::Handle(h.to_string());
+    }
+
+    let clean = path.split('/').next().unwrap_or(path);
+    ChannelQuery::Handle(format!("@{}", clean.trim_start_matches('@')))
+}
+
+#[derive(Clone, Serialize, serde::Deserialize)]
+pub struct ChannelDetails {
+    pub channel_id: String,
+    pub title: String,
+    pub description: String,
+    pub custom_url: String,
+    pub thumbnail_url: String,
+    pub uploads_playlist_id: Option<String>,
+}
+
+#[derive(Clone, Serialize, serde::Deserialize)]
+pub struct ChannelPlaylistsResult {
+    pub channel_id: String,
+    pub title: String,
+    pub handle: String,
+    pub thumbnail_url: String,
+    pub uploads_playlist_id: Option<String>,
+    pub playlists: Vec<PlaylistSummary>,
+}
+
 
 /// client_secret.json を探すディレクトリ（カレント → exe の隣）。token.json も同じ場所に置く。
 fn base_dir() -> Result<PathBuf, String> {
@@ -358,6 +441,118 @@ impl YouTube {
         Ok(out)
     }
 
+/// channels.list でチャンネル情報を取得する。
+    pub async fn fetch_channel_info(&self, query: &ChannelQuery) -> Result<ChannelDetails, String> {
+        let mut items = Vec::new();
+        match query {
+            ChannelQuery::Id(id) => {
+                let body = self.get_json(CHANNELS, &[("part", "snippet,contentDetails"), ("id", id)]).await?;
+                if let Some(arr) = body["items"].as_array() {
+                    items.extend(arr.iter().cloned());
+                }
+            }
+            ChannelQuery::Handle(handle) => {
+                let h = if handle.starts_with('@') { handle.clone() } else { format!("@{handle}") };
+                if let Ok(body) = self.get_json(CHANNELS, &[("part", "snippet,contentDetails"), ("forHandle", &h)]).await {
+                    if let Some(arr) = body["items"].as_array().filter(|a| !a.is_empty()) {
+                        items.extend(arr.iter().cloned());
+                    }
+                }
+                if items.is_empty() {
+                    let uname = handle.trim_start_matches('@');
+                    if let Ok(body2) = self.get_json(CHANNELS, &[("part", "snippet,contentDetails"), ("forUsername", uname)]).await {
+                        if let Some(arr2) = body2["items"].as_array().filter(|a| !a.is_empty()) {
+                            items.extend(arr2.iter().cloned());
+                        }
+                    }
+                }
+            }
+            ChannelQuery::Username(uname) => {
+                if let Ok(body) = self.get_json(CHANNELS, &[("part", "snippet,contentDetails"), ("forUsername", uname)]).await {
+                    if let Some(arr) = body["items"].as_array().filter(|a| !a.is_empty()) {
+                        items.extend(arr.iter().cloned());
+                    }
+                }
+                if items.is_empty() {
+                    let h = format!("@{uname}");
+                    if let Ok(body) = self.get_json(CHANNELS, &[("part", "snippet,contentDetails"), ("forHandle", &h)]).await {
+                        if let Some(arr) = body["items"].as_array() {
+                            items.extend(arr.iter().cloned());
+                        }
+                    }
+                }
+            }
+        }
+
+        let item = items.into_iter().next().ok_or_else(|| "チャンネルが見つかりませんでした。URLやハンドル名をご確認ください。".to_string())?;
+        let channel_id = item["id"].as_str().unwrap_or_default().to_string();
+        let title = item["snippet"]["title"].as_str().unwrap_or_default().to_string();
+        let description = item["snippet"]["description"].as_str().unwrap_or_default().to_string();
+        let custom_url = item["snippet"]["customUrl"].as_str().unwrap_or_default().to_string();
+        let thumbnail_url = best_thumbnail(&item["snippet"]["thumbnails"]);
+        let uploads_playlist_id = item["contentDetails"]["relatedPlaylists"]["uploads"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        Ok(ChannelDetails {
+            channel_id,
+            title,
+            description,
+            custom_url,
+            thumbnail_url,
+            uploads_playlist_id,
+        })
+    }
+
+    /// 対象チャンネルの公開再生リスト（およびアップロード動画）一覧を取得する。
+    /// 動画IDから、その動画のチャンネルIDを取得する。
+    pub async fn video_channel(&self, video_id: &str) -> Result<String, String> {
+        let query = [
+            ("part", "snippet"),
+            ("id", video_id),
+        ];
+        let body = self.get_json(VIDEOS, &query).await?;
+        let ch_id = body["items"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|it| it["snippet"]["channelId"].as_str())
+            .ok_or_else(|| "動画のチャンネル情報が見つかりませんでした".to_string())?;
+        Ok(ch_id.to_string())
+    }
+
+    pub async fn channel_playlists(&self, input: &str) -> Result<ChannelPlaylistsResult, String> {
+        let query = parse_channel_input(input);
+        let channel = self.fetch_channel_info(&query).await?;
+
+        let mut playlists = self.fetch_summaries(("channelId", &channel.channel_id)).await?;
+
+        if let Some(uploads_id) = &channel.uploads_playlist_id {
+            if !playlists.iter().any(|p| p.id == *uploads_id) {
+                let found = self.fetch_summaries(("id", uploads_id)).await.ok().and_then(|mut v| v.pop());
+                let mut s = found.unwrap_or(PlaylistSummary {
+                    id: uploads_id.clone(),
+                    title: "アップロード動画（すべての動画）".to_string(),
+                    item_count: 0,
+                    is_new: false,
+                });
+                if s.title.is_empty() {
+                    s.title = "アップロード動画（すべての動画）".to_string();
+                }
+                playlists.insert(0, s);
+            }
+        }
+
+        Ok(ChannelPlaylistsResult {
+            channel_id: channel.channel_id,
+            title: channel.title,
+            handle: channel.custom_url,
+            thumbnail_url: channel.thumbnail_url,
+            uploads_playlist_id: channel.uploads_playlist_id,
+            playlists,
+        })
+    }
+
     pub async fn playlist_summary(&self, id: &str) -> Result<PlaylistSummary, String> {
         self.fetch_summaries(("id", id))
             .await?
@@ -383,6 +578,9 @@ impl YouTube {
             for it in body["items"].as_array().into_iter().flatten() {
                 let sn = &it["snippet"];
                 let pos = sn["position"].as_u64().unwrap_or(0) as usize;
+                let ch_id = sn["videoOwnerChannelId"]
+                    .as_str()
+                    .unwrap_or_else(|| sn["channelId"].as_str().unwrap_or_default());
                 items.push(PlaylistItem {
                     playlist_item_id: it["id"].as_str().unwrap_or_default().into(),
                     video_id: sn["resourceId"]["videoId"].as_str().unwrap_or_default().into(),
@@ -391,6 +589,7 @@ impl YouTube {
                     current_position: pos,
                     thumbnail_url: best_thumbnail(&sn["thumbnails"]),
                     channel: sn["videoOwnerChannelTitle"].as_str().unwrap_or_default().into(),
+                    channel_id: ch_id.to_string(),
                     is_new: false,
                 });
             }
@@ -416,12 +615,15 @@ impl YouTube {
     }
 
     /// playlistItems.insert: 指定位置に動画を追加し、できた playlistItem の ID を返す。
-    pub async fn insert_item(&self, playlist_id: &str, video_id: &str, position: usize) -> Result<String, String> {
-        let body = json!({ "snippet": {
+    pub async fn insert_item(&self, playlist_id: &str, video_id: &str, position: Option<usize>) -> Result<String, String> {
+        let mut snippet = json!({
             "playlistId": playlist_id,
-            "position": position,
             "resourceId": { "kind": "youtube#video", "videoId": video_id },
-        }});
+        });
+        if let Some(p) = position {
+            snippet["position"] = json!(p); // 並び順が「手動」でないリストは、位置の指定を受け付けない
+        }
+        let body = json!({ "snippet": snippet });
         let req = self.http.post(API).query(&[("part", "snippet")]);
         let v = self.send_json(req, &body).await?;
         v["id"].as_str().map(str::to_string).ok_or_else(|| "追加した動画の ID を取得できません".into())
@@ -509,6 +711,7 @@ pub async fn fetch_oembed(video_id: &str) -> Result<VideoInfo, String> {
         title: v["title"].as_str().unwrap_or(video_id).to_string(),
         thumbnail_url: v["thumbnail_url"].as_str().unwrap_or_default().to_string(),
         channel: v["author_name"].as_str().unwrap_or_default().to_string(),
+        channel_url: v["author_url"].as_str().unwrap_or_default().to_string(),
     })
 }
 
@@ -540,6 +743,18 @@ mod tests {
         assert!(parse_client_json(r#"{"web":{"client_id":"a"}}"#).unwrap_err().contains("ウェブ"));
         assert!(parse_client_json("{}").is_err());
         assert!(parse_client_json("not json").is_err());
+    }
+
+    #[test]
+    fn parses_channel_query() {
+        use super::{parse_channel_input, ChannelQuery};
+        assert_eq!(parse_channel_input("https://www.youtube.com/@Ado1024"), ChannelQuery::Handle("@Ado1024".into()));
+        assert_eq!(parse_channel_input("https://www.youtube.com/@Ado1024/playlists"), ChannelQuery::Handle("@Ado1024".into()));
+        assert_eq!(parse_channel_input("https://www.youtube.com/channel/UC2XdaAVUannpujzv32jcouQ"), ChannelQuery::Id("UC2XdaAVUannpujzv32jcouQ".into()));
+        assert_eq!(parse_channel_input("UC2XdaAVUannpujzv32jcouQ"), ChannelQuery::Id("UC2XdaAVUannpujzv32jcouQ".into()));
+        assert_eq!(parse_channel_input("https://www.youtube.com/user/officialbeatles"), ChannelQuery::Username("officialbeatles".into()));
+        assert_eq!(parse_channel_input("@Ado1024"), ChannelQuery::Handle("@Ado1024".into()));
+        assert_eq!(parse_channel_input("Ado1024"), ChannelQuery::Handle("@Ado1024".into()));
     }
 
     #[test]

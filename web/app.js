@@ -51,7 +51,7 @@ function renderTree() {
     const head = document.createElement("div");
     head.className = "plname";
     const got = cache[s.id] && cache[s.id].fetched_at;
-    head.title = "クリックで展開 / ダブルクリックで並べ替えウィンドウ" + (got ? `\n取得: ${new Date(got * 1000).toLocaleString("ja-JP")} 時点（右クリックで最新を取得）` : "");
+    head.title = "クリックで展開 / ダブルクリックで並べ替えウィンドウ / ドラッグ: 上下の端にドロップで並び順の変更、中央にドロップで動画の取り込み" + (got ? `\n取得: ${new Date(got * 1000).toLocaleString("ja-JP")} 時点（右クリックで最新を取得）` : "");
     head.innerHTML = '<span class="arrow"></span><span class="name"></span><span class="badge" hidden>新規</span><span class="cnt"></span>';
     head.querySelector(".arrow").textContent = expanded.has(s.id) ? "▼" : "▶";
     head.querySelector(".name").textContent = s.title;
@@ -68,19 +68,35 @@ function renderTree() {
       dragList = null;
       document.querySelectorAll(".dropTarget").forEach((el) => el.classList.remove("dropTarget"));
     });
+    // 行の上端・下端にドロップすると並び順の変更、中央にドロップすると取り込み（コピー）
+    const zone = (e) => {
+      const r = head.getBoundingClientRect();
+      const y = (e.clientY - r.top) / r.height;
+      return y < 0.28 ? "before" : y > 0.72 ? "after" : "import";
+    };
+    const clearDrop = () => head.classList.remove("dropTarget", "dropBefore", "dropAfter");
     head.addEventListener("dragover", (e) => {
       if (!dragList || dragList === s.id) return;
       e.preventDefault();
-      e.dataTransfer.dropEffect = "copy";
-      head.classList.add("dropTarget");
+      const z = zone(e);
+      e.dataTransfer.dropEffect = z === "import" ? "copy" : "move";
+      clearDrop();
+      head.classList.add(z === "before" ? "dropBefore" : z === "after" ? "dropAfter" : "dropTarget");
     });
-    head.addEventListener("dragleave", () => head.classList.remove("dropTarget"));
+    head.addEventListener("dragleave", clearDrop);
     head.addEventListener("drop", async (e) => {
       e.preventDefault();
-      head.classList.remove("dropTarget");
+      const z = zone(e);
+      clearDrop();
       const from = summaries.find((x) => x.id === dragList);
       dragList = null;
       if (!from || from.id === s.id) return;
+      if (z !== "import") {
+        const i = summaries.findIndex((x) => x.id === s.id);
+        const before = z === "before" ? s.id : (summaries[i + 1] ? summaries[i + 1].id : null);
+        await moveList(from.id, before);
+        return;
+      }
       if (!confirm(`「${from.title}」の動画（${from.item_count}本）を、「${s.title}」の末尾に取り込みます。\n元のリストは変わりません。YouTube への反映は Push で行います。\n続行しますか？`)) return;
       await doImport(s, [from.id]);
     });
@@ -91,6 +107,43 @@ function renderTree() {
     if (expanded.has(s.id)) li.appendChild(renderChildren(s.id));
     ul.appendChild(li);
   }
+}
+
+// リストの並び順を変える（before の直前へ。null なら末尾へ）
+async function moveList(id, before) {
+  const list = await call("move_summary", { playlistId: id, before });
+  if (!list) return;
+  summaries = list;
+  renderTree();
+}
+
+const selected = { id: null, items: new Set() };   // ツリーで選択中の動画（リスト id, playlist_item_id）。Ctrl+クリックで複数選択
+
+function syncSel(ul, id) {
+  const items = cache[id] ? cache[id].items : [];
+  [...ul.children].forEach((x, i) => x.classList.toggle("sel", selected.id === id && !!items[i] && selected.items.has(items[i].playlist_item_id)));
+  // 「全選択」チェックボックスと選択数を同期
+  const bar = ul.parentElement.querySelector(".selBar");
+  if (!bar) return;
+  const n = selected.id === id ? items.filter((x) => selected.items.has(x.playlist_item_id)).length : 0;
+  const cb = bar.querySelector("input");
+  cb.checked = n > 0 && n === items.length;
+  cb.indeterminate = n > 0 && n < items.length;
+  bar.querySelector(".selCount").textContent = n ? `${n}本を選択中（Del キーでリストから外す）` : "";
+}
+
+// 選択中の動画（なければ target）をリストから取り除く。YouTube への反映は Push のとき
+async function removeSelected(id, target) {
+  const ids = selected.id === id && selected.items.size ? [...selected.items] : target ? [target] : [];
+  if (!ids.length) return;
+  selected.id = null; selected.items.clear();
+  const pl = await call("remove_items", { playlistId: id, itemIds: ids });
+  if (!pl) return;
+  cache[id] = pl;
+  summaries = await invoke("list_summaries");
+  renderTree();
+  refreshPush();
+  status(`${ids.length}本をリストから外しました（YouTube への反映は Push で。編集ウィンドウの「元に戻す」で復活できます）`);
 }
 
 let drag = null;       // ツリー上の動画のドラッグ元 { id, idx }
@@ -113,6 +166,17 @@ function renderChildren(id) {
   box.className = "children";
   const pl = cache[id];
   if (!pl) { box.innerHTML = '<div class="msg">読み込み中...</div>'; return box; }
+  const bar = document.createElement("div");
+  bar.className = "selBar";
+  bar.innerHTML = '<label><input type="checkbox"> 全選択</label><span class="selCount"></span>';
+  const all = bar.querySelector("input");
+  all.onchange = () => {
+    selected.id = id; selected.items.clear();
+    if (all.checked) pl.items.forEach((x) => selected.items.add(x.playlist_item_id));
+    else selected.id = null;
+    syncSel(box.querySelector(".vlist"), id);
+  };
+  box.appendChild(bar);
   const ul = document.createElement("ul");
   ul.className = "vlist";
   pl.items.forEach((it, idx) => {
@@ -136,12 +200,25 @@ function renderChildren(id) {
       document.querySelectorAll(".dragover").forEach((el) => el.classList.remove("dragover"));
     });
     li.addEventListener("dblclick", () => playVideo(id, it.video_id));
+    if (selected.id === id && selected.items.has(it.playlist_item_id)) li.classList.add("sel");
+    li.addEventListener("click", (e) => {
+      if (e.target.closest(".handle")) return;
+      const multi = e.ctrlKey || e.metaKey;
+      if (selected.id !== id || !multi) { selected.id = id; selected.items.clear(); }
+      if (multi && selected.items.has(it.playlist_item_id)) selected.items.delete(it.playlist_item_id);
+      else selected.items.add(it.playlist_item_id);
+      syncSel(li.parentElement, id);   // 再描画しない（ダブルクリックでの再生を妨げないため）
+    });
     li.addEventListener("contextmenu", (e) => {
       e.preventDefault();
+      if (selected.id !== id || !selected.items.has(it.playlist_item_id)) { selected.id = id; selected.items.clear(); selected.items.add(it.playlist_item_id); syncSel(li.parentElement, id); }
+      const n = selected.items.size;
       Common.showMenu(e.clientX, e.clientY, [
         { label: "ここから連続再生", fn: () => playVideo(id, it.video_id) },
         { label: "この1本だけ再生", fn: () => playVideo(id, it.video_id, 0, true) },
         { label: "リストに保存…", fn: () => Common.openPicker(it) },
+        { label: "このチャンネルの再生リストを取得…", fn: () => openChannelForVideo(it) },
+        { label: n > 1 ? `選んだ ${n}本をリストから外す` : "リストから外す", danger: true, fn: () => removeSelected(id, it.playlist_item_id) },
       ]);
     });
     li.addEventListener("dragstart", (e) => { drag = { id, idx }; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(idx)); });
@@ -159,6 +236,7 @@ function renderChildren(id) {
     ul.appendChild(li);
   });
   box.appendChild(ul);
+  syncSel(ul, id);
   return box;
 }
 
@@ -175,6 +253,19 @@ const hideCtx = () => { $("ctxMenu").hidden = true; };
 document.addEventListener("click", hideCtx);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideCtx(); });
 window.addEventListener("blur", hideCtx);
+const shiftList = async (delta) => {
+  const s = ctxTarget;
+  hideCtx();
+  if (!s) return;
+  const i = summaries.findIndex((x) => x.id === s.id);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= summaries.length) return;
+  // 上へ: 一つ上の直前 / 下へ: 一つ下のさらに次の直前（末尾なら null）
+  const before = delta < 0 ? summaries[j].id : (summaries[j + 1] ? summaries[j + 1].id : null);
+  await moveList(s.id, before);
+};
+$("ctxUp").onclick = () => shiftList(-1);
+$("ctxDown").onclick = () => shiftList(1);
 $("ctxEdit").onclick = () => {
   const s = ctxTarget;
   hideCtx();
@@ -281,9 +372,55 @@ async function offerDeferred() {
   if (confirm(`前回反映しきれなかった変更が${total}件あります（約${total * 50}ユニット）。\nPush の画面を開きますか？`)) $("pushBtn").click();
 }
 
+function isChannelInput(text) {
+  if (!text) return false;
+  const s = text.trim();
+  if (/[?&]list=/.test(s)) return false;
+  if (/[?&]v=/.test(s) || /youtu\.be\//.test(s)) return false;
+  if (s.startsWith("@") || /\/@/.test(s)) return true;
+  if (/youtube\.com\/(channel|c|user)\//.test(s)) return true;
+  if (/^(UC|HC)[A-Za-z0-9_-]{20,}$/.test(s)) return true;
+  return false;
+}
+
+async function openChannel(text) {
+  status("チャンネルの再生リストを取得中...");
+  try {
+    const res = await Common.openChannelPlaylists(text);
+    if (res && res.updatedSummaries) {
+      summaries = res.updatedSummaries;
+      renderTree();
+    }
+    $("plInput").value = "";
+    status("");
+  } catch (e) {
+    status("");
+    alert(e);
+  }
+}
+
+async function openChannelForVideo(video) {
+  status("チャンネルの再生リストを取得中...");
+  try {
+    const res = await Common.openChannelForVideo(video);
+    if (res && res.updatedSummaries) {
+      summaries = res.updatedSummaries;
+      renderTree();
+    }
+    status("");
+  } catch (e) {
+    status("");
+    alert(e);
+  }
+}
+
 $("addBtn").onclick = async () => {
   const text = $("plInput").value.trim();
   if (!text) return;
+  if (isChannelInput(text)) {
+    await openChannel(text);
+    return;
+  }
   // list= を含む URL / ID はプレイリストとして追加。それ以外の動画の URL は再生のみ
   const isPlaylist = /[?&]list=/.test(text) || /^(PL|UU|FL|OL|LL)[A-Za-z0-9_-]{10,}$/.test(text);
   const v = isPlaylist ? null : Common.parseVideoInput(text);
@@ -292,17 +429,36 @@ $("addBtn").onclick = async () => {
   if (list) { summaries = list; $("plInput").value = ""; renderTree(); }
 };
 
+$("channelBtn").onclick = async () => {
+  let text = $("plInput").value.trim();
+  if (!text || (!isChannelInput(text) && (/[?&]list=/.test(text) || Common.parseVideoInput(text)))) {
+    text = await Common.askText("チャンネルの URL または @ハンドル名を入力してください:\n（例: https://www.youtube.com/@channel名 または @channel名）");
+    if (!text) return;
+  }
+  await openChannel(text);
+};
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Delete" || !selected.id || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) || document.querySelector("dialog[open]")) return;
+  removeSelected(selected.id, null);
+});
+
 $("copyBtn").onclick = async () => {
   const text = $("plInput").value.trim();
-  if (!text) { status("コピーする公開リストの URL を入力してください"); return; }
+  if (isChannelInput(text)) {
+    await openChannel(text);
+    return;
+  }
+  if (!text) { status("開く公開リストの URL を入力してください"); return; }
   if (!/[?&]list=/.test(text) && !/^(PL|UU|FL|OL|LL)[A-Za-z0-9_-]{10,}$/.test(text)) { status("プレイリストの URL を入力してください"); return; }
-  const r = await call("copy_public_playlist", { playlistInput: text });
+  const r = await Common.openPublicList(text);
   if (!r) return;
-  summaries = r.summaries;
+  summaries = await invoke("list_summaries");
+  if (cache[r.id]) cache[r.id] = await invoke("get_playlist", { playlistId: r.id });
   $("plInput").value = "";
   renderTree();
   refreshPush();
-  status(`「${r.title}」を ${r.count}本のコピーとして作成しました。Push で YouTube に作成されます（約${(r.count + 1) * 50}ユニット）`);
+  status(`${r.added}本を「${r.title}」にコピーしました` + (r.skipped ? `（すでに入っている ${r.skipped}本はスキップ）` : "") + "。Push で YouTube に反映されます");
 };
 
 // URL の動画を再生する（リストには登録しない）。同じ動画が再生中にもう一度押されたら、登録用のポップアップを出す。
@@ -607,6 +763,10 @@ $("urlCopy").onclick = async () => {
   catch (e) { $("musicUrl").select(); document.execCommand("copy"); status("URLをコピーしました"); }
 };
 $("urlOpen").onclick = () => { const url = $("musicUrl").value; if (url) invoke("open_url", { url }); };
+$("musicChannelBtn").onclick = () => {
+  if (nowVideoId) openChannelForVideo({ video_id: nowVideoId, ...(nowSingle || {}) });
+  else status("動画が再生されていません");
+};
 
 // ---- 画面下部のメモ（タイムスタンプ付き / 自由記述） ----
 let memos = [];

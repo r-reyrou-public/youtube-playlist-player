@@ -18,7 +18,10 @@
   <button id="writeBtn" class="danger">YouTubeへ反映</button>
   <span id="status"></span>
 </header>
-<div id="editorMain"><ul id="list" class="vlist"></ul></div>
+<div id="editorMain">
+  <div class="selBar"><label><input type="checkbox" id="selAll"> 全選択</label><span id="selCount"></span></div>
+  <ul id="list" class="vlist"></ul>
+</div>
 <script src="common.js"></script>
 <script src="editor.js"></script>
 </body>

@@ -8,6 +8,8 @@
 <body>
 <div id="ctxMenu" hidden>
   <button id="ctxEdit">編集（並べ替え）</button>
+  <button id="ctxUp">一つ上へ</button>
+  <button id="ctxDown">一つ下へ</button>
   <button id="ctxFind">検索・並べ替え…</button>
   <button id="ctxRefresh">YouTubeから最新を取得</button>
   <button id="ctxImport">他のリストの動画を取り込む…</button>
@@ -81,10 +83,11 @@
           <button id="modeVideo" class="active">動画モード</button>
           <button id="modeMusic">音楽モード</button>
         </div>
-        <input id="plInput" placeholder="プレイリストまたは動画の URL">
+        <input id="plInput" placeholder="プレイリスト・動画・チャンネルの URL / @ハンドル名">
         <span id="status"></span>
-        <button id="addBtn" title="プレイリスト: 一覧に追加 / 動画: 再生（同じ URL でもう一度押すとリストに登録）">追加</button>
-        <button id="copyBtn" title="公開リストの URL から、全動画を入れた自分の新規リストを作る（Push で YouTube に作成）">丸ごとコピー</button>
+        <button id="addBtn" title="プレイリスト: 一覧に追加 / 動画: 再生 / チャンネル: 再生リスト一覧を開く">追加</button>
+        <button id="copyBtn" title="公開リストの URL を開き、動画を選んで（全選択可）自分のリストへコピーする">公開リストを開く</button>
+        <button id="channelBtn" title="チャンネルURLまたは@ハンドル名から、公開再生リスト一覧を取得します">チャンネルのリスト</button>
         <button id="myBtn">マイリスト取得</button>
         <button id="pushBtn" class="danger" title="手元の変更をYouTubeへ反映します">Push (0)</button>
         <div id="menuWrap">
@@ -108,6 +111,7 @@
         <div class="urlBtns">
           <button id="urlCopy">コピー</button>
           <button id="urlOpen">ブラウザで開く</button>
+          <button id="musicChannelBtn" title="再生中動画のチャンネルの再生リスト一覧を取得します">チャンネルのリスト</button>
         </div>
       </aside>
     </div>

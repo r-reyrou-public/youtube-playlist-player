@@ -229,6 +229,112 @@ const Common = (() => {
   }
 
 
+  // ---- 公開リストを開き、全動画を一覧表示して、選んだ動画を自分のリストへコピーする。結果は CopyResult、取り消しは null ----
+  async function openPublicList(input) {
+    const dlg = el("dialog");
+    dlg.id = "publicDlg";
+    const head = el("h3", "", "公開リストを開く");
+    dlg.appendChild(head);
+    const bar = el("div", "fdBar");
+    const allBtn = el("button", "", "全選択");
+    const noneBtn = el("button", "", "全解除");
+    const count = el("span", "pkVideo", "");
+    bar.append(allBtn, noneBtn, count);
+    dlg.appendChild(bar);
+    const list = el("div", "pkList");
+    list.appendChild(el("div", "pkMsg", "リストを読み込み中..."));
+    dlg.appendChild(list);
+
+    const dest = el("div", "pubDest");
+    const rNew = el("input"); rNew.type = "radio"; rNew.name = "pubDest"; rNew.checked = true;
+    const nameIn = el("input"); nameIn.type = "text"; nameIn.maxLength = 150; nameIn.placeholder = "新規リスト名";
+    const rOld = el("input"); rOld.type = "radio"; rOld.name = "pubDest";
+    const sel = el("select");
+    const l1 = el("label"); l1.append(rNew, " 新規リストを作る ", nameIn);
+    const l2 = el("label"); l2.append(rOld, " 既存のリストに追加 ", sel);
+    dest.append(l1, l2);
+    dlg.appendChild(dest);
+    dlg.appendChild(el("p", "note", "選んだ動画を自分のリストへコピーします（元のリストは変わりません）。YouTube への反映は Push で行います（動画1本 50 ユニット、新規リストはさらに 50 ユニット）。"));
+
+    const btns = el("div", "dlgBtns");
+    const apply = el("button", "primary", "コピー");
+    const cancel = el("button", "", "キャンセル");
+    apply.disabled = true;
+    btns.append(apply, cancel);
+    dlg.appendChild(btns);
+    document.body.appendChild(dlg);
+
+    let finish;
+    const result = new Promise((r) => { finish = r; });
+    const close = (v) => { dlg.close(); dlg.remove(); finish(v); };
+    cancel.onclick = () => close(null);
+    dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(null); });
+    dlg.showModal();
+
+    const boxes = [];   // { cb, id }
+    const refresh = () => {
+      const n = boxes.filter((b) => b.cb.checked).length;
+      count.textContent = `${n} / ${boxes.length}本を選択中`;
+      apply.disabled = n === 0;
+    };
+    allBtn.onclick = () => { boxes.forEach((b) => (b.cb.checked = true)); refresh(); };
+    noneBtn.onclick = () => { boxes.forEach((b) => (b.cb.checked = false)); refresh(); };
+    nameIn.addEventListener("focus", () => (rNew.checked = true));
+    sel.addEventListener("focus", () => (rOld.checked = true));
+
+    apply.onclick = async () => {
+      const video_ids = boxes.filter((b) => b.cb.checked).map((b) => b.id);
+      if (!video_ids.length) return;
+      if (rOld.checked && !sel.value) { alert("追加先のリストを選んでください"); return; }
+      apply.disabled = true;
+      cancel.disabled = true;
+      try {
+        if (rOld.checked) await invoke("get_playlist", { playlistId: sel.value });   // 未取得なら取得
+        close(await invoke("copy_peeked", { videoIds: video_ids, target: rOld.checked ? sel.value : null, title: nameIn.value }));
+      } catch (e) {
+        alert(e);
+        apply.disabled = false;
+        cancel.disabled = false;
+      }
+    };
+
+    try {
+      const pk = await invoke("peek_public_playlist", { playlistInput: input });
+      head.textContent = `公開リスト: ${pk.title}（${pk.items.length}本）`;
+      nameIn.value = pk.title;
+      list.textContent = "";
+      if (!pk.items.length) list.appendChild(el("div", "pkMsg", "動画がありません。"));
+      pk.items.forEach((it) => {
+        const row = el("label", "pkRow");
+        const cb = el("input");
+        cb.type = "checkbox";
+        cb.checked = true;
+        cb.addEventListener("change", refresh);
+        boxes.push({ cb, id: it.video_id });
+        const chSpan = el("span", "c chLink", it.channel);
+        chSpan.title = "このチャンネルの再生リスト一覧を開く";
+        chSpan.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          openChannelForVideo({ video_id: it.video_id, channel: it.channel });
+        };
+        row.append(cb, el("span", "t", it.title), chSpan);
+        list.appendChild(row);
+      });
+      for (const s of await invoke("list_summaries")) {
+        const o = el("option", "", `${s.title}（${s.item_count}本）`);
+        o.value = s.id;
+        sel.appendChild(o);
+      }
+      if (!sel.options.length) { rOld.disabled = true; sel.disabled = true; }
+      refresh();
+    } catch (e) {
+      list.textContent = "";
+      list.appendChild(el("div", "pkMsg", String(e)));
+    }
+    return result;
+  }
+
   // ---- リスト内の検索・並べ替えのポップアップ。項目を選ぶと onPick(item, 位置) を呼んで閉じる ----
   async function openFinder(playlistId, onPick) {
     const dlg = el("dialog");
@@ -464,5 +570,195 @@ const Common = (() => {
     return (Number(m[1] || 0) * 3600) + (Number(m[2] || 0) * 60) + Number(m[3] || 0);
   }
 
-  return { askText, showMenu, hideMenu, openPicker, openImporter, openFinder, openPush, parseVideoInput };
+  // ---- チャンネルの公開再生リスト一覧を取得・表示し、一覧への追加や動画の選択コピーを行う ----
+  async function openChannelPlaylists(input) {
+    const dlg = el("dialog");
+    dlg.id = "channelDlg";
+    const header = el("div", "chHeader");
+    const thumb = el("img", "chThumb");
+    thumb.src = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>";
+    thumb.hidden = true;
+    const meta = el("div", "chMeta");
+    const head = el("h3", "", "チャンネルの再生リストを取得中...");
+    const sub = el("div", "chHandle", "");
+    meta.append(head, sub);
+    header.append(thumb, meta);
+    dlg.appendChild(header);
+
+    const bar = el("div", "fdBar");
+    const filterInput = el("input");
+    filterInput.type = "search";
+    filterInput.placeholder = "リスト名を絞り込み...";
+    filterInput.style.flex = "1";
+
+    const allBtn = el("button", "", "全選択");
+    const noneBtn = el("button", "", "全解除");
+    const count = el("span", "pkVideo", "");
+    const addSelectedBtn = el("button", "primary", "選択したリストを一覧に追加");
+    addSelectedBtn.disabled = true;
+
+    bar.append(filterInput, allBtn, noneBtn, count, addSelectedBtn);
+    dlg.appendChild(bar);
+
+    const list = el("div", "pkList");
+    list.appendChild(el("div", "pkMsg", "チャンネル情報を取得しています..."));
+    dlg.appendChild(list);
+
+    dlg.appendChild(el("p", "note", "「一覧に追加」で左ペインのマイリストに登録されます。「動画を選ぶ」でリスト内の動画を選んで自分のリストへコピーできます。"));
+
+    const btns = el("div", "dlgBtns");
+    const closeBtn = el("button", "", "閉じる");
+    btns.appendChild(closeBtn);
+    dlg.appendChild(btns);
+    document.body.appendChild(dlg);
+
+    let finish;
+    const result = new Promise((r) => { finish = r; });
+    let updatedSummaries = null;
+    const close = () => { dlg.close(); dlg.remove(); finish({ updatedSummaries }); };
+    closeBtn.onclick = close;
+    dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });
+    dlg.showModal();
+
+    let allRows = []; // { p, row, cb, addBtn, badge }
+    const refreshCount = () => {
+      const checkedBoxes = allRows.filter((r) => r.cb.checked);
+      count.textContent = `${checkedBoxes.length} / ${allRows.length}件選択中`;
+      addSelectedBtn.disabled = checkedBoxes.length === 0;
+    };
+
+    allBtn.onclick = () => {
+      allRows.filter((r) => !r.row.hidden).forEach((r) => (r.cb.checked = true));
+      refreshCount();
+    };
+    noneBtn.onclick = () => {
+      allRows.forEach((r) => (r.cb.checked = false));
+      refreshCount();
+    };
+
+    filterInput.addEventListener("input", () => {
+      const q = filterInput.value.trim().toLowerCase();
+      allRows.forEach((r) => {
+        r.row.hidden = q ? !r.p.title.toLowerCase().includes(q) : false;
+      });
+      refreshCount();
+    });
+
+    addSelectedBtn.onclick = async () => {
+      const selected = allRows.filter((r) => r.cb.checked);
+      if (!selected.length) return;
+      addSelectedBtn.disabled = true;
+      try {
+        const ids = selected.map((r) => r.p.id);
+        const res = await invoke("add_playlists", { playlistIds: ids });
+        updatedSummaries = res;
+        const currentSet = new Set(res.map((s) => s.id));
+        selected.forEach((r) => {
+          r.cb.checked = false;
+          if (currentSet.has(r.p.id)) {
+            r.addBtn.disabled = true;
+            r.addBtn.textContent = "追加済み";
+            r.badge.hidden = false;
+          }
+        });
+        refreshCount();
+        alert(`${ids.length}件の再生リストを一覧に追加しました。`);
+      } catch (e) {
+        alert(e);
+        addSelectedBtn.disabled = false;
+      }
+    };
+
+    try {
+      const res = await invoke("fetch_channel_playlists", { channelInput: input });
+      head.textContent = `${res.title} の再生リスト（${res.playlists.length}件）`;
+      sub.textContent = res.handle || res.channel_id;
+      if (res.thumbnail_url) {
+        thumb.src = res.thumbnail_url;
+        thumb.hidden = false;
+      }
+      list.textContent = "";
+
+      if (!res.playlists.length) {
+        list.appendChild(el("div", "pkMsg", "公開されている再生リストが見つかりませんでした。"));
+        return result;
+      }
+
+      const currentSummaries = await invoke("list_summaries");
+      const currentSet = new Set(currentSummaries.map((s) => s.id));
+
+      res.playlists.forEach((p) => {
+        const row = el("div", "chRow");
+        const cb = el("input");
+        cb.type = "checkbox";
+        cb.addEventListener("change", refreshCount);
+
+        const titleSpan = el("span", "t", p.title);
+        const countSpan = el("span", "c", p.item_count ? `${p.item_count}本` : "");
+        const badge = el("span", "badge", "追加済み");
+        const isAdded = currentSet.has(p.id);
+        badge.hidden = !isAdded;
+
+        const actions = el("div", "actions");
+        const addBtn = el("button", "", isAdded ? "追加済み" : "一覧に追加");
+        if (isAdded) addBtn.disabled = true;
+        addBtn.onclick = async (e) => {
+          e.stopPropagation();
+          addBtn.disabled = true;
+          try {
+            const list = await invoke("add_playlist", { playlistInput: p.id });
+            updatedSummaries = list;
+            badge.hidden = false;
+            addBtn.textContent = "追加済み";
+          } catch (err) {
+            alert(err);
+            addBtn.disabled = false;
+          }
+        };
+
+        const pickBtn = el("button", "", "動画を選ぶ");
+        pickBtn.title = "リスト内の動画を選んで自分のリストへコピー";
+        pickBtn.onclick = async (e) => {
+          e.stopPropagation();
+          const r = await openPublicList(p.id);
+          if (r) {
+            updatedSummaries = await invoke("list_summaries");
+          }
+        };
+
+        actions.append(addBtn, pickBtn);
+        row.append(cb, titleSpan, countSpan, badge, actions);
+        list.appendChild(row);
+        allRows.push({ p, row, cb, addBtn, badge });
+      });
+
+      refreshCount();
+    } catch (e) {
+      list.textContent = "";
+      list.appendChild(el("div", "pkMsg", String(e)));
+      head.textContent = "チャンネル情報の取得に失敗しました";
+    }
+
+    return result;
+  }
+
+  // ---- 動画情報または動画IDから、その動画の投稿チャンネルの公開再生リスト一覧を開く ----
+  async function openChannelForVideo(video) {
+    if (!video) return;
+    const vId = typeof video === "string" ? video : video.video_id;
+    const directChannel = typeof video === "object" ? (video.channel_id || video.channel_url) : null;
+    if (directChannel) {
+      return openChannelPlaylists(directChannel);
+    }
+    try {
+      const channelInput = await invoke("get_video_channel", { videoId: vId });
+      if (channelInput) {
+        return openChannelPlaylists(channelInput);
+      }
+    } catch (e) {
+      alert(`チャンネル情報の取得に失敗しました: ${e}`);
+    }
+  }
+
+  return { askText, showMenu, hideMenu, openPicker, openImporter, openPublicList, openChannelPlaylists, openChannelForVideo, openFinder, openPush, parseVideoInput };
 })();

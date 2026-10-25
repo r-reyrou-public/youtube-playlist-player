@@ -1,0 +1,65 @@
+1
+00:00:00,000 --> 00:00:06,000
+YouTube Playlist Player is a desktop app for viewing and reordering
+the user's own YouTube playlists.
+
+2
+00:00:06,000 --> 00:00:12,000
+Step 1: The user clicks "Get my playlists".
+The app opens the Google sign-in page in the browser.
+
+3
+00:00:12,000 --> 00:00:18,000
+The URL bar shows the OAuth client ID that is requesting access.
+
+4
+00:00:18,000 --> 00:00:28,000
+Step 2: The consent screen. The app requests the YouTube scope
+(https://www.googleapis.com/auth/youtube).
+
+5
+00:00:28,000 --> 00:00:38,000
+It needs this scope to read the user's playlists and to change the order of
+videos in a playlist. A read-only scope cannot do the second part.
+
+6
+00:00:38,000 --> 00:00:44,000
+The user reviews the request and clicks Allow.
+
+7
+00:00:44,000 --> 00:00:54,000
+Step 3: The app shows the user's playlists. Clicking a playlist expands it
+and lists the videos it contains.
+
+8
+00:00:54,000 --> 00:01:08,000
+Step 4: Double-clicking a playlist opens a window where the user reorders
+videos locally: sort by title, shuffle, or drag and drop.
+
+9
+00:01:08,000 --> 00:01:16,000
+Nothing is sent to YouTube yet. All changes stay on the user's device.
+
+10
+00:01:16,000 --> 00:01:28,000
+Step 5: The user clicks Push. The app shows how many playlist items
+will be updated and asks for confirmation.
+
+11
+00:01:28,000 --> 00:01:38,000
+After confirmation, the app sends only the changes: playlistItems.update,
+insert and delete, and playlists.insert for new playlists.
+
+12
+00:01:38,000 --> 00:01:50,000
+Step 6: On youtube.com, the same playlist now shows the new order.
+
+13
+00:01:50,000 --> 00:02:00,000
+The app never deletes playlists or uploads/deletes videos, and does not access
+comments, subscriptions, or account settings.
+
+14
+00:02:00,000 --> 00:02:10,000
+Data and sign-in tokens are stored only on the user's computer.
+No data is sent to the developer's servers.

@@ -5,6 +5,7 @@ const playlistId = new URLSearchParams(location.search).get("id");
 
 let state = { items: [] };
 let dragFrom = null;
+const selected = new Set();   // 選択中の動画（playlist_item_id）。クリックで選択、Ctrl+クリックで複数選択
 
 function status(msg) { $("status").textContent = msg; }
 
@@ -40,10 +41,20 @@ async function call(cmd, args, raw = false) {
 
 async function setState(s) {
   state = s;
+  for (const id of [...selected]) if (!s.items.some((it) => it.playlist_item_id === id)) selected.delete(id);   // 外した・移した動画は選択から除く
   $("plTitle").textContent = s.title;
   render();
   const n = await invoke("pending_count", { playlistId });
   $("writeBtn").textContent = `YouTubeへ反映 (${n}件 / ${n * 50}ユニット)`;
+}
+
+// 選択中の動画（なければ target）をリストから取り除く。YouTube への反映は Push のとき
+async function removeSelected(target) {
+  const ids = selected.size ? [...selected] : target ? [target] : [];
+  if (!ids.length) return;
+  selected.clear();
+  const s = await call("remove_items", { itemIds: ids });
+  if (s) { setState(s); status(`${ids.length}本をリストから外しました（YouTube への反映は Push で。「元に戻す」で復活できます）`); }
 }
 
 async function moveBy(idx, delta) {
@@ -80,9 +91,23 @@ const listArea = $("editorMain");
 listArea.addEventListener("dragover", (e) => { if (acceptsDrag(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; } });
 listArea.addEventListener("drop", (e) => dropAt(e, state.items.length));
 
+function syncSelAll() {
+  const n = state.items.filter((it) => selected.has(it.playlist_item_id)).length;
+  $("selAll").checked = n > 0 && n === state.items.length;
+  $("selAll").indeterminate = n > 0 && n < state.items.length;
+  $("selCount").textContent = n ? `${n}本を選択中（Del キーでリストから外す）` : "";
+}
+
+$("selAll").onchange = () => {
+  selected.clear();
+  if ($("selAll").checked) state.items.forEach((it) => selected.add(it.playlist_item_id));
+  render();
+};
+
 function render() {
   const ul = $("list");
   ul.innerHTML = "";
+  syncSelAll();
   state.items.forEach((it, idx) => {
     const li = document.createElement("li");
     li.draggable = false;
@@ -107,16 +132,34 @@ function render() {
     li.querySelector(".down").onclick = () => moveBy(idx, 1);
     li.querySelector("img").src = it.thumbnail_url;
     li.querySelector(".title").textContent = it.title;
+    if (selected.has(it.playlist_item_id)) li.classList.add("sel");
+    li.addEventListener("click", (e) => {
+      if (e.target.closest("button")) return;
+      if (!e.ctrlKey && !e.metaKey) selected.clear();
+      if (e.ctrlKey || e.metaKey) { selected.has(it.playlist_item_id) ? selected.delete(it.playlist_item_id) : selected.add(it.playlist_item_id); }
+      else selected.add(it.playlist_item_id);
+      render();
+    });
     li.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      Common.showMenu(e.clientX, e.clientY, [{ label: "リストに保存…", fn: () => Common.openPicker(it) }]);
+      if (!selected.has(it.playlist_item_id)) { selected.clear(); selected.add(it.playlist_item_id); render(); }
+      const n = selected.size;
+      Common.showMenu(e.clientX, e.clientY, [
+        { label: "リストに保存…", fn: () => Common.openPicker(it) },
+        { label: "このチャンネルの再生リストを取得…", fn: () => Common.openChannelForVideo(it) },
+        { label: n > 1 ? `選んだ ${n}本をリストから外す` : "リストから外す", danger: true, fn: () => removeSelected(it.playlist_item_id) },
+      ]);
     });
     li.addEventListener("dragstart", (e) => {
       dragFrom = idx;
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData("text/plain", it.title);
       e.dataTransfer.setData(CROSS_TYPE, "1");   // 他の編集ウィンドウが「この画面の動画」と判別する目印
-      invoke("drag_begin", { playlistId, itemId: it.playlist_item_id }).catch(() => {});
+      // 選択中の動画をドラッグした場合は、選択中の動画をまとめて移動する
+      const ids = selected.has(it.playlist_item_id) && selected.size > 1
+        ? state.items.filter((x) => selected.has(x.playlist_item_id)).map((x) => x.playlist_item_id)
+        : [it.playlist_item_id];
+      invoke("drag_begin", { playlistId, itemIds: ids }).catch(() => {});
     });
     li.addEventListener("dragover", (e) => {
       if (!acceptsDrag(e)) return;
@@ -129,6 +172,11 @@ function render() {
     ul.appendChild(li);
   });
 }
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Delete" || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) || document.querySelector("dialog[open]")) return;
+  removeSelected(null);
+});
 
 document.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
   const a = b.dataset.act;

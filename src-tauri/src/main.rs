@@ -19,8 +19,10 @@ struct Inner {
     client: Option<YouTube>,
     summaries: Vec<PlaylistSummary>,
     playlists: HashMap<String, Playlist>,
-    /// ウィンドウ間ドラッグの移動元（playlist_id, playlist_item_id）。
-    drag: Option<(String, String)>,
+    /// 「公開リストを開く」で取得中の他人のリスト（コピー用）。
+    peek: Option<Playlist>,
+    /// ウィンドウ間ドラッグの移動元（playlist_id, 動画の playlist_item_id 複数）。
+    drag: Option<(String, Vec<String>)>,
     next_local: u32,
     next_item: u32,
 }
@@ -31,6 +33,14 @@ impl Inner {
             Some(x) => *x = s,
             None => self.summaries.push(s),
         }
+    }
+
+    /// 一覧の並びを変える: id のリストを before の直前へ移す（before が None なら末尾へ）。
+    fn move_summary(&mut self, id: &str, before: Option<&str>) {
+        let Some(from) = self.summaries.iter().position(|s| s.id == id) else { return };
+        let item = self.summaries.remove(from);
+        let at = before.and_then(|b| self.summaries.iter().position(|s| s.id == b)).unwrap_or(self.summaries.len());
+        self.summaries.insert(at, item);
     }
 
     /// 一覧用の要約。読み込み済みのリストは、編集中の件数・タイトル・新規かどうかを反映する。
@@ -176,6 +186,56 @@ async fn add_playlist(
     Ok(out)
 }
 
+/// チャンネルURLやハンドル名からチャンネル情報および公開再生リスト一覧を取得する。
+#[tauri::command]
+async fn fetch_channel_playlists(
+    app: App<'_>,
+    conn: State<'_, ConnectLock>,
+    channel_input: String,
+) -> Result<youtube::ChannelPlaylistsResult, String> {
+    let c = client(&app, &conn).await?;
+    let res = c.channel_playlists(&channel_input).await?;
+    let cost = 1 + ((res.playlists.len() + 49) / 50).max(1) as u32;
+    quota::add(cost);
+    Ok(res)
+}
+
+/// 複数のプレイリストを一括で一覧へ追加する。
+#[tauri::command]
+async fn add_playlists(
+    app: App<'_>,
+    conn: State<'_, ConnectLock>,
+    handle: AppHandle,
+    playlist_ids: Vec<String>,
+) -> Result<Vec<PlaylistSummary>, String> {
+    let c = client(&app, &conn).await?;
+    let mut g = app.lock().await;
+    for id in playlist_ids {
+        if let Ok(s) = c.playlist_summary(&id).await {
+            if g.playlists.get(&s.id).is_some_and(|p| p.deleted) {
+                g.playlists.remove(&s.id);
+            }
+            g.upsert_summary(s);
+        }
+    }
+    let out = g.list_summaries();
+    drop(g);
+    schedule_save(&handle);
+    Ok(out)
+}
+
+/// 一覧でのリストの並び順を変える（通信なし）。before が None なら末尾へ。並びは cache.json に保存される。
+#[tauri::command]
+async fn move_summary(app: App<'_>, handle: AppHandle, playlist_id: String, before: Option<String>) -> Result<Vec<PlaylistSummary>, String> {
+    let out = {
+        let mut g = app.lock().await;
+        g.move_summary(&playlist_id, before.as_deref());
+        g.list_summaries()
+    };
+    schedule_save(&handle);
+    Ok(out)
+}
+
 /// 通信なしで、現在の一覧（編集中の件数・新規リストを含む）を返す。
 #[tauri::command]
 async fn list_summaries(app: App<'_>) -> Result<Vec<PlaylistSummary>, String> {
@@ -267,6 +327,7 @@ async fn import_playlists(
                 title: i.title.clone(),
                 thumbnail_url: i.thumbnail_url.clone(),
                 channel: i.channel.clone(),
+                channel_url: String::new(),
             }));
         }
         let (mut added, mut skipped) = (0usize, 0usize);
@@ -287,35 +348,78 @@ async fn import_playlists(
 }
 
 #[derive(Serialize)]
-struct CopyResult {
-    summaries: Vec<PlaylistSummary>,
-    id: String,
+struct PeekItem {
+    video_id: String,
     title: String,
-    count: usize,
+    channel: String,
 }
 
-/// 公開されているリストの URL / ID から、全動画を入れた自分の新規リストを手元に作る（元のリストは変わらない）。
-/// 取得は playlistItems.list（1ユニット/50件）。YouTube への作成は Push のとき（非公開）。
+#[derive(Serialize)]
+struct PeekResult {
+    title: String,
+    items: Vec<PeekItem>,
+}
+
+/// 公開リストの URL / ID から全動画を取得して返す（一覧には追加しない）。取得は playlistItems.list（1ユニット/50件）。
+/// 取得した内容は copy_peeked のために保持する。
 #[tauri::command]
-async fn copy_public_playlist(
-    app: App<'_>,
-    conn: State<'_, ConnectLock>,
-    handle: AppHandle,
-    playlist_input: String,
-) -> Result<CopyResult, String> {
+async fn peek_public_playlist(app: App<'_>, conn: State<'_, ConnectLock>, playlist_input: String) -> Result<PeekResult, String> {
     let src_id = youtube::parse_playlist_id(&playlist_input);
     let c = client(&app, &conn).await?;
     let summary = c.playlist_summary(&src_id).await?;
     let src = c.fetch_playlist(&src_id, &summary.title).await?; // 通信中は共有状態をロックしない
-    let title: String = summary.title.chars().take(150).collect();
-    let title = if title.trim().is_empty() { "コピーしたリスト".to_string() } else { title };
-    let (id, summaries, count) = {
+    let out = PeekResult {
+        title: summary.title.clone(),
+        items: src
+            .items
+            .iter()
+            .map(|i| PeekItem { video_id: i.video_id.clone(), title: i.title.clone(), channel: i.channel.clone() })
+            .collect(),
+    };
+    app.lock().await.peek = Some(src);
+    Ok(out)
+}
+
+#[derive(Serialize)]
+struct CopyResult {
+    id: String,
+    title: String,
+    added: usize,
+    skipped: usize,
+}
+
+/// peek_public_playlist で開いたリストのうち、選んだ動画（video_ids。元の並び順を保つ）を自分のリストへコピーする。
+/// target が None なら、title の新規リスト（Push で非公開リストとして作成）を手元に作る。Some なら、そのリストの末尾に追加する。
+#[tauri::command]
+async fn copy_peeked(
+    app: App<'_>,
+    handle: AppHandle,
+    video_ids: Vec<String>,
+    target: Option<String>,
+    title: String,
+) -> Result<CopyResult, String> {
+    let chosen: HashSet<String> = video_ids.into_iter().collect();
+    let (id, title, added, skipped) = {
         let mut g = app.lock().await;
-        let id = g.next_local_id();
-        let mut pl = Playlist::new_local(id.clone(), title.clone());
-        let mut count = 0;
-        for i in &src.items {
+        let src = g.peek.clone().ok_or("コピー元のリストが開かれていません")?;
+        let (id, title, mut pl, is_new) = match &target {
+            Some(t) => {
+                let p = g.playlists.remove(t).ok_or("コピー先のリストが読み込まれていません")?;
+                (t.clone(), p.title.clone(), p, false)
+            }
+            None => {
+                let title: String = title.trim().chars().take(150).collect();
+                if title.is_empty() {
+                    return Err("リスト名を入力してください".into());
+                }
+                let id = g.next_local_id();
+                (id.clone(), title.clone(), Playlist::new_local(id, title), true)
+            }
+        };
+        let (mut added, mut skipped) = (0usize, 0usize);
+        for i in src.items.iter().filter(|i| chosen.contains(&i.video_id)) {
             if pl.contains_video(&i.video_id) {
+                skipped += 1;
                 continue;
             }
             let new_id = g.next_item_id();
@@ -325,18 +429,21 @@ async fn copy_public_playlist(
                     title: i.title.clone(),
                     thumbnail_url: i.thumbnail_url.clone(),
                     channel: i.channel.clone(),
+                    channel_url: String::new(),
                 },
                 new_id,
                 None,
             );
-            count += 1;
+            added += 1;
         }
         g.playlists.insert(id.clone(), pl);
-        g.summaries.push(PlaylistSummary { id: id.clone(), title: title.clone(), item_count: count, is_new: true });
-        (id, g.list_summaries(), count)
+        if is_new {
+            g.summaries.push(PlaylistSummary { id: id.clone(), title: title.clone(), item_count: added, is_new: true });
+        }
+        (id, title, added, skipped)
     };
     notify(&handle, &id);
-    Ok(CopyResult { summaries, id, title, count })
+    Ok(CopyResult { id, title, added, skipped })
 }
 
 /// 動画1本の情報（タイトル・サムネイル）を oEmbed で取得する。API のクォータは消費せず、ログインも不要。
@@ -345,10 +452,28 @@ async fn video_info(video_id: String) -> Result<VideoInfo, String> {
     youtube::fetch_oembed(&video_id).await
 }
 
+/// 動画IDから、その動画のチャンネルIDまたはチャンネルURLを取得する。
+#[tauri::command]
+async fn get_video_channel(
+    app: App<'_>,
+    conn: State<'_, ConnectLock>,
+    video_id: String,
+) -> Result<String, String> {
+    if let Ok(info) = youtube::fetch_oembed(&video_id).await {
+        if !info.channel_url.trim().is_empty() {
+            return Ok(info.channel_url);
+        }
+    }
+    let c = client(&app, &conn).await?;
+    let ch = c.video_channel(&video_id).await?;
+    quota::add(1);
+    Ok(ch)
+}
+
 /// ウィンドウ間ドラッグの開始: 移動元を覚えておく（ドロップ側のウィンドウが move_between で使う）。
 #[tauri::command]
-async fn drag_begin(app: App<'_>, playlist_id: String, item_id: String) -> Result<(), String> {
-    app.lock().await.drag = Some((playlist_id, item_id));
+async fn drag_begin(app: App<'_>, playlist_id: String, item_ids: Vec<String>) -> Result<(), String> {
+    app.lock().await.drag = Some((playlist_id, item_ids));
     Ok(())
 }
 
@@ -362,26 +487,40 @@ async fn move_between(
 ) -> Result<Playlist, String> {
     let (from, out) = {
         let mut g = app.lock().await;
-        let (from, item_id) = g.drag.take().ok_or("移動元の情報がありません。もう一度ドラッグしてください")?;
+        let (from, item_ids) = g.drag.take().ok_or("移動元の情報がありません。もう一度ドラッグしてください")?;
         if from == to_playlist {
             return Err("同じリスト内の移動は、ウィンドウ内でドラッグしてください".into());
         }
         if !g.playlists.contains_key(&from) || !g.playlists.contains_key(&to_playlist) {
             return Err("プレイリストが読み込まれていません".into());
         }
-        let item = g
-            .playlists
-            .get_mut(&from)
-            .and_then(|p| p.take_item(&item_id))
-            .ok_or("移動する動画が見つかりません")?;
-        let new_id = g.next_item_id();
-        let target = g.playlists.get_mut(&to_playlist).ok_or("プレイリストが読み込まれていません")?;
-        target.add_video(
-            VideoInfo { video_id: item.video_id, title: item.title, thumbnail_url: item.thumbnail_url, channel: item.channel },
-            new_id,
-            Some(to_index),
-        );
-        (from, target.clone())
+        // 元のリストでの並び順を保ったまま、すべて取り出す
+        let order: Vec<String> = g.playlists[&from]
+            .items
+            .iter()
+            .filter(|i| item_ids.contains(&i.playlist_item_id))
+            .map(|i| i.playlist_item_id.clone())
+            .collect();
+        if order.is_empty() {
+            return Err("移動する動画が見つかりません".into());
+        }
+        let mut moved = Vec::new();
+        for id in &order {
+            if let Some(item) = g.playlists.get_mut(&from).and_then(|p| p.take_item(id)) {
+                moved.push(item);
+            }
+        }
+        for (k, item) in moved.into_iter().enumerate() {
+            let new_id = g.next_item_id();
+            let target = g.playlists.get_mut(&to_playlist).ok_or("プレイリストが読み込まれていません")?;
+            target.add_video(
+                VideoInfo { video_id: item.video_id, title: item.title, thumbnail_url: item.thumbnail_url, channel: item.channel, channel_url: String::new() },
+                new_id,
+                Some(to_index + k),
+            );
+        }
+        let out = g.playlists[&to_playlist].clone();
+        (from, out)
     };
     notify(&handle, &from);
     notify(&handle, &to_playlist);
@@ -471,6 +610,18 @@ async fn move_item(
     to_index: usize,
 ) -> Result<Playlist, String> {
     edit(&app, &handle, &playlist_id, |p| p.move_item(from_index, to_index)).await
+}
+
+/// リストから動画を取り除く（YouTube からの削除は Push のとき。「元に戻す」で復活できる）。
+#[tauri::command]
+async fn remove_items(app: App<'_>, handle: AppHandle, playlist_id: String, item_ids: Vec<String>) -> Result<Playlist, String> {
+    edit(&app, &handle, &playlist_id, |p| {
+        for id in &item_ids {
+            p.take_item(id);
+        }
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -582,7 +733,18 @@ fn save_deferred(g: &Inner) {
     quota::save_deferred(&quota::Deferred { playlists, summaries, next_local: g.next_local, next_item: g.next_item });
 }
 
-async fn exec_op(client: &YouTube, op: &Op, remote: &Option<String>, title: &str) -> Result<Option<String>, String> {
+/// エラー表示用の操作名。
+fn op_label(op: &Op) -> String {
+    match op {
+        Op::CreatePlaylist => "リストの作成".into(),
+        Op::DeletePlaylist => "リストの削除".into(),
+        Op::Delete { item_id } => format!("動画の削除（{item_id}）"),
+        Op::Insert { video_id, position, .. } => format!("動画の追加（動画 {video_id} / 位置 {position}）"),
+        Op::Move { video_id, position, .. } => format!("動画の位置変更（動画 {video_id} / 位置 {position}）"),
+    }
+}
+
+async fn exec_op(client: &YouTube, op: &Op, remote: &Option<String>, title: &str, appended: &mut bool) -> Result<Option<String>, String> {
     const NOT_CREATED: &str = "リストがまだ YouTube に作成されていません";
     match op {
         Op::CreatePlaylist => client.create_playlist(title).await.map(Some),
@@ -596,7 +758,14 @@ async fn exec_op(client: &YouTube, op: &Op, remote: &Option<String>, title: &str
         },
         Op::Delete { item_id } => client.delete_item(item_id).await.map(|_| None),
         Op::Insert { video_id, position, .. } => match remote {
-            Some(rid) => client.insert_item(rid, video_id, *position).await.map(Some),
+            Some(rid) => match client.insert_item(rid, video_id, Some(*position)).await {
+                // 位置を受け付けないリスト（並び順が「手動」でない等）は、末尾に追加する
+                Err(e) if e.contains("400") => {
+                    *appended = true;
+                    client.insert_item(rid, video_id, None).await.map(Some)
+                }
+                r => r.map(Some),
+            },
             None => Err(NOT_CREATED.into()),
         },
         Op::Move { item_id, video_id, position } => match remote {
@@ -637,6 +806,8 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
     let client = client(&app, &conn).await?;
     progress.1 = pending_lists(&*app.lock().await, ids).iter().map(|p| p.count).sum();
     let mut touched: Vec<String> = Vec::new();
+    let mut recreated: Vec<String> = Vec::new();
+    let mut synced: Vec<String> = Vec::new();
     let outcome = loop {
         if ctl.cancel.load(Ordering::SeqCst) {
             break Ok("cancelled");
@@ -658,7 +829,29 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
             }
             continue;
         }
-        match exec_op(&client, &op, &remote, &title).await {
+        // 位置の変更の前に、YouTube 上の実際の並びを取得し直す（追加時に位置を指定できなかった場合や、並び順を「手動」に切り替えた場合に、
+        // 手元の想定とずれているため）。リストごとに1回だけ
+        if matches!(op, Op::Move { .. }) && remote.is_some() && !synced.contains(&pid) {
+            synced.push(pid.clone());
+            if let Ok(fresh) = client.fetch_playlist(remote.as_deref().unwrap_or_default(), &title).await {
+                quota::add(((fresh.items.len() + 49) / 50).max(1) as u32);
+                let server_ids: Vec<String> = fresh.items.iter().map(|i| i.playlist_item_id.clone()).collect();
+                if let Some(p) = app.lock().await.playlists.get_mut(&pid) {
+                    p.set_server(server_ids);
+                }
+                progress.1 = pending_lists(&*app.lock().await, ids).iter().map(|p| p.count).sum::<usize>() + progress.0;
+                continue;
+            }
+        }
+        let label = op_label(&op);
+        let mut appended = false;
+        let result = exec_op(&client, &op, &remote, &title, &mut appended).await;
+        // 位置を指定できず末尾に追加した場合は、サーバー側の並びもそのとおりに記録する（以降の位置変更で整える）
+        let op = match &op {
+            Op::Insert { item_id, video_id, .. } if appended => Op::Insert { item_id: item_id.clone(), video_id: video_id.clone(), position: usize::MAX },
+            _ => op,
+        };
+        match result {
             Ok(result_id) => {
                 quota::add(quota::OP_COST);
                 let mut g = app.lock().await;
@@ -675,7 +868,32 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
                 emit_progress(handle, "running", progress.0, progress.1, String::new(), 0);
             }
             Err(e) if quota::is_quota_error(&e) && mode != "now" => quota::mark_exhausted(),
-            Err(e) => break Err(e),
+            // このアプリで作ったリストが YouTube に見つからない（削除された等）: 1回だけ作り直す
+            Err(e) if e.contains("404") && matches!(op, Op::Insert { .. } | Op::Move { .. }) && pid.starts_with("local-") && !recreated.contains(&pid) => {
+                recreated.push(pid.clone());
+                if let Some(p) = app.lock().await.playlists.get_mut(&pid) {
+                    p.forget_remote();
+                }
+                progress.1 = pending_lists(&*app.lock().await, ids).iter().map(|p| p.count).sum::<usize>() + progress.0;
+            }
+            // 他人の公開リストなど、YouTube 上で削除権限のないリストを一覧から削除した場合は、手元から破棄して完了扱いにする
+            Err(e) if op == Op::DeletePlaylist && e.contains("403") => {
+                let mut g = app.lock().await;
+                g.playlists.remove(&pid);
+                g.summaries.retain(|s| s.id != pid);
+                progress.0 += 1;
+                emit_progress(handle, "running", progress.0, progress.1, String::new(), 0);
+            }
+            Err(e) => {
+                let hint = if e.contains("403") && !quota::is_quota_error(&e) {
+                    "\n\n【原因】このプレイリスト（または動画）の編集権限がありません（他人が作成した公開リストなど）。\nYouTube 側を変更できないため、ツリーで対象リストを右クリックして「YouTubeから最新を取得」を押して手元の未反映の変更を破棄するか、「一覧から削除」してください。"
+                } else if e.contains("400") && matches!(op, Op::Insert { .. } | Op::Move { .. }) {
+                    "\nこのリストの並び順が「手動」になっていない可能性があります。YouTube でリストの並び順を「手動」にしてからやり直してください"
+                } else {
+                    ""
+                };
+                break Err(format!("「{title}」で{}に失敗しました: {e}{hint}", label));
+            }
         }
     };
     save_deferred(&*app.lock().await);
@@ -891,6 +1109,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_my_playlists,
             add_playlist,
+            add_playlists,
+            fetch_channel_playlists,
             get_playlist,
             refresh_playlist,
             list_summaries,
@@ -898,13 +1118,17 @@ fn main() {
             set_video_playlists,
             drag_begin,
             video_info,
+            get_video_channel,
             import_playlists,
-            copy_public_playlist,
+            move_summary,
+            peek_public_playlist,
+            copy_peeked,
             move_between,
             sort_title,
             sort_items,
             shuffle,
             move_item,
+            remove_items,
             reset,
             pending_count,
             pending_summary,
