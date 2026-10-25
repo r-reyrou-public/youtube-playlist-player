@@ -1,6 +1,6 @@
 [package]
 name = "youtube-playlist-player"
-version = "0.5.3-alpha"
+version = "0.6.0-alpha"
 edition = "2021"
 repository = "https://github.com/r-reyrou-public/youtube-playlist-player"
 

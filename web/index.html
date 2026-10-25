@@ -6,23 +6,11 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header>
-  <input id="plInput" placeholder="プレイリストURL または ID">
-  <button id="addBtn">追加</button>
-  <button id="myBtn">マイリスト取得</button>
-  <span class="sep"></span>
-  <button id="pushBtn" class="danger" title="手元の並び替えをYouTubeへ反映します">Push (0)</button>
-  <span id="status"></span>
-  <div id="menuWrap">
-    <button id="menuBtn" aria-label="メニュー" title="メニュー">☰</button>
-    <div id="menu" hidden>
-      <button id="openSettings">設定</button>
-      <button id="openHelp">ヘルプ</button>
-    </div>
-  </div>
-</header>
 <div id="ctxMenu" hidden>
-  <button id="ctxRemove">一覧から削除</button>
+  <button id="ctxEdit">編集（並べ替え）</button>
+  <button id="ctxFind">検索・並べ替え…</button>
+  <button id="ctxImport">他のリストの動画を取り込む…</button>
+  <button id="ctxRemove">削除（一覧から外す）</button>
 </div>
 <dialog id="settingsDlg">
   <h3>設定</h3>
@@ -79,27 +67,81 @@
   <div class="dlgBtns"><button id="helpClose">閉じる</button></div>
 </dialog>
 <main>
-  <aside id="treePane"><ul id="tree"></ul></aside>
-  <section id="stage" class="video-mode">
-    <div id="modeBar">
-      <button id="modeVideo" class="active">動画モード</button>
-      <button id="modeMusic">音楽モード</button>
+  <aside id="treePane">
+    <div id="treeHead">
+      <button id="treeToggle" title="リストを畳む / 開く">«</button>
+      <button id="newListBtn" title="手元に新しいリストを作ります（YouTube へは Push で作成）">＋ 新規リスト</button>
     </div>
-    <div id="musicUi">
-      <img id="musicThumb" alt="">
-      <div id="musicTitle">-</div>
-      <div class="controls">
-        <button id="prevBtn">⏮</button>
-        <button id="playBtn">⏯</button>
-        <button id="nextBtn">⏭</button>
+    <ul id="tree"></ul>
+  </aside>
+  <div id="rightCol">
+    <section id="stage" class="video-mode">
+      <div id="topbar">
+        <div id="modeBar">
+          <button id="modeVideo" class="active">動画モード</button>
+          <button id="modeMusic">音楽モード</button>
+        </div>
+        <input id="plInput" placeholder="プレイリストまたは動画の URL">
+        <span id="status"></span>
+        <button id="addBtn" title="プレイリスト: 一覧に追加 / 動画: 再生（同じ URL でもう一度押すとリストに登録）">追加</button>
+        <button id="myBtn">マイリスト取得</button>
+        <button id="pushBtn" class="danger" title="手元の変更をYouTubeへ反映します">Push (0)</button>
+        <div id="menuWrap">
+          <button id="menuBtn" aria-label="メニュー" title="メニュー">☰</button>
+          <div id="menu" hidden>
+            <button id="openSettings">設定</button>
+            <button id="openHelp">ヘルプ</button>
+          </div>
+        </div>
       </div>
-      <input id="seek" type="range" min="0" max="1000" value="0">
-      <div id="times">0:00 / 0:00</div>
+    <div id="musicUi">
+      <div id="musicMain">
+        <img id="musicThumb" alt="">
+        <div id="musicTitle">-</div>
+        <div class="controls">
+          <button id="prevBtn">⏮</button>
+          <button id="playBtn">⏯</button>
+          <button id="nextBtn">⏭</button>
+        </div>
+        <input id="seek" type="range" min="0" max="1000" value="0">
+        <div id="times">0:00 / 0:00</div>
+      </div>
+      <aside id="musicSide">
+        <label for="musicUrl">再生中の動画のURL</label>
+        <input id="musicUrl" type="text" readonly placeholder="再生すると表示されます">
+        <div class="urlBtns">
+          <button id="urlCopy">コピー</button>
+          <button id="urlOpen">ブラウザで開く</button>
+        </div>
+      </aside>
     </div>
     <div id="playerBox"><div id="player"></div></div>
-  </section>
+    <div id="speedBar">
+      <span>再生速度</span>
+      <select id="speedSel"></select>
+      <button id="speedReset" title="再生速度を 1x に戻します">リセット</button>
+      <span id="onceTag" hidden>この1本だけ再生中（終わったら止まります）</span>
+    </div>
+    </section>
+    <footer id="memoPane">
+      <div class="memoHead">
+        <strong>メモ</strong>
+        <span class="memoHint">Enter で再生位置のリンク付きメモを追加（Shift+Enter で改行）</span>
+        <span class="grow"></span>
+        <button id="memoCopy" title="すべてのメモを、リンク付きのテキストとしてコピーします">すべてコピー</button>
+        <button id="memoClear">クリア</button>
+      </div>
+      <ul id="memoList"></ul>
+      <div class="memoInput">
+        <label><input type="checkbox" id="memoStamp" checked> 再生位置を付ける</label>
+        <textarea id="memoText" rows="2" placeholder="メモを入力（空のまま Enter で再生位置だけ記録）"></textarea>
+        <button id="memoAdd" class="primary">追加</button>
+      </div>
+    </footer>
+  </div>
 </main>
 <script src="https://www.youtube.com/iframe_api"></script>
+<script src="common.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

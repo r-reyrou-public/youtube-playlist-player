@@ -16,7 +16,7 @@ function setBusy(on) {
   document.querySelectorAll("header button[id], header [data-act]").forEach((b) => { if (!b.closest("#menu") && b.id !== "menuBtn") b.disabled = busy > 0; });
 }
 
-async function call(cmd, args) {
+async function call(cmd, args, raw = false) {
   const t0 = Date.now();
   const tick = () => status(`処理中... ${Math.floor((Date.now() - t0) / 1000)}秒`);
   tick();
@@ -24,7 +24,7 @@ async function call(cmd, args) {
   setBusy(true);
   try {
     const data = await Promise.race([
-      invoke(cmd, { playlistId, ...args }),
+      invoke(cmd, raw ? args : { playlistId, ...args }),
       new Promise((_, rej) => setTimeout(() => rej("応答がありません（タイムアウト）。もう一度お試しください。"), CALL_LIMIT_MS)),
     ]);
     status("");
@@ -43,13 +43,42 @@ async function setState(s) {
   $("plTitle").textContent = s.title;
   render();
   const n = await invoke("pending_count", { playlistId });
-  $("writeBtn").textContent = `YouTubeへ書き戻し (${n}件 / ${n * 50}ユニット)`;
+  $("writeBtn").textContent = `YouTubeへ反映 (${n}件 / ${n * 50}ユニット)`;
 }
 
 async function moveBy(idx, delta) {
   const s = await call("move_item", { fromIndex: idx, toIndex: idx + delta });
   if (s) setState(s);
 }
+
+const CROSS_TYPE = "application/x-ytpl-item";
+
+// この画面内のドラッグ、または別の編集ウィンドウからのドラッグを受け付ける
+function acceptsDrag(e) {
+  return dragFrom !== null || (e.dataTransfer && Array.from(e.dataTransfer.types).includes(CROSS_TYPE));
+}
+
+// index の位置へドロップ。同じ画面内なら並べ替え、別ウィンドウからなら移動（元のリストからは取り除く）
+async function dropAt(e, index) {
+  e.preventDefault();
+  document.querySelectorAll(".dragover").forEach((el) => el.classList.remove("dragover"));
+  if (dragFrom !== null) {
+    const from = dragFrom;
+    dragFrom = null;
+    const to = Math.min(index, state.items.length - 1);
+    if (from === to) return;
+    const s = await call("move_item", { fromIndex: from, toIndex: to });
+    if (s) setState(s);
+  } else if (Array.from(e.dataTransfer.types).includes(CROSS_TYPE)) {
+    const s = await call("move_between", { toPlaylist: playlistId, toIndex: index }, true);
+    if (s) setState(s);
+  }
+}
+
+// 一覧の余白（末尾）へのドロップ
+const listArea = $("editorMain");
+listArea.addEventListener("dragover", (e) => { if (acceptsDrag(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; } });
+listArea.addEventListener("drop", (e) => dropAt(e, state.items.length));
 
 function render() {
   const ul = $("list");
@@ -58,6 +87,7 @@ function render() {
     const li = document.createElement("li");
     li.draggable = false;
     if (it.current_position !== it.original_position) li.classList.add("changed");
+    if (it.is_new) li.classList.add("isnew");
     li.innerHTML = `<span class="handle" title="ドラッグして並べ替え">⠿</span><span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>` +
       `<span class="mv"><button class="up" title="1つ上へ">▲</button><button class="down" title="1つ下へ">▼</button></span>`;
     const handle = li.querySelector(".handle");
@@ -77,16 +107,25 @@ function render() {
     li.querySelector(".down").onclick = () => moveBy(idx, 1);
     li.querySelector("img").src = it.thumbnail_url;
     li.querySelector(".title").textContent = it.title;
-    li.addEventListener("dragstart", (e) => { dragFrom = idx; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(idx)); });
-    li.addEventListener("dragover", (e) => { if (dragFrom === null) return; e.preventDefault(); li.classList.add("dragover"); });
-    li.addEventListener("dragleave", () => li.classList.remove("dragover"));
-    li.addEventListener("drop", async (e) => {
+    li.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      if (dragFrom === null || dragFrom === idx) return;
-      const s = await call("move_item", { fromIndex: dragFrom, toIndex: idx });
-      dragFrom = null;
-      if (s) setState(s);
+      Common.showMenu(e.clientX, e.clientY, [{ label: "リストに保存…", fn: () => Common.openPicker(it) }]);
     });
+    li.addEventListener("dragstart", (e) => {
+      dragFrom = idx;
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", it.title);
+      e.dataTransfer.setData(CROSS_TYPE, "1");   // 他の編集ウィンドウが「この画面の動画」と判別する目印
+      invoke("drag_begin", { playlistId, itemId: it.playlist_item_id }).catch(() => {});
+    });
+    li.addEventListener("dragover", (e) => {
+      if (!acceptsDrag(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      li.classList.add("dragover");
+    });
+    li.addEventListener("dragleave", () => li.classList.remove("dragover"));
+    li.addEventListener("drop", (e) => { e.stopPropagation(); dropAt(e, idx); });
     ul.appendChild(li);
   });
 }
@@ -100,12 +139,17 @@ document.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
   if (s) setState(s);
 });
 
+$("findBtn").onclick = () => Common.openFinder(playlistId, (it, idx) => {
+  const li = $("list").children[idx];
+  if (!li) return;
+  li.scrollIntoView({ block: "center" });
+  li.classList.add("found");
+  setTimeout(() => li.classList.remove("found"), 2500);
+});
+
 $("writeBtn").onclick = async () => {
-  const n = await invoke("pending_count", { playlistId });
-  if (!n) { alert("変更はありません。"); return; }
-  if (!confirm(`${n}件を更新します（約${n * 50}ユニット消費）。\nプレイリストが「手動並べ替え」設定であることを確認してください。続行しますか？`)) return;
-  const d = await call("write_back");
-  if (d) { setState(d.state); status(`${d.updated}件を更新しました`); }
+  try { await Common.openPush([playlistId]); } catch (e) { alert(e); }
+  try { setState(await invoke("get_playlist", { playlistId })); } catch (_) {}
 };
 
 (async () => {

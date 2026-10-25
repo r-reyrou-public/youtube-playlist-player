@@ -11,7 +11,7 @@ use yup_oauth2::authenticator::DefaultAuthenticator;
 use yup_oauth2::authenticator_delegate::InstalledFlowDelegate;
 use yup_oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};
 
-use crate::model::{Playlist, PlaylistItem};
+use crate::model::{Playlist, PlaylistItem, VideoInfo};
 
 const SCOPE: &str = "https://www.googleapis.com/auth/youtube";
 const API: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
@@ -229,11 +229,13 @@ impl InstalledFlowDelegate for BrowserDelegate {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 pub struct PlaylistSummary {
     pub id: String,
     pub title: String,
     pub item_count: usize,
+    /// 手元だけで作成した、まだ YouTube に無いリスト。
+    pub is_new: bool,
 }
 
 #[derive(Clone)]
@@ -241,12 +243,6 @@ pub struct YouTube {
     auth: DefaultAuthenticator,
     http: reqwest::Client,
     token_path: PathBuf,
-}
-
-/// 書き戻しの結果。途中で失敗した場合は done 件まで反映済み。
-pub struct WriteOutcome {
-    pub done: usize,
-    pub error: Option<String>,
 }
 
 impl YouTube {
@@ -327,6 +323,7 @@ impl YouTube {
                     id: it["id"].as_str().unwrap_or_default().into(),
                     title: it["snippet"]["title"].as_str().unwrap_or_default().into(),
                     item_count: it["contentDetails"]["itemCount"].as_u64().unwrap_or(0) as usize,
+                    is_new: false,
                 });
             }
             page_token = body["nextPageToken"].as_str().map(str::to_string);
@@ -373,6 +370,8 @@ impl YouTube {
                     original_position: pos,
                     current_position: pos,
                     thumbnail_url: best_thumbnail(&sn["thumbnails"]),
+                    channel: sn["videoOwnerChannelTitle"].as_str().unwrap_or_default().into(),
+                    is_new: false,
                 });
             }
             page_token = body["nextPageToken"].as_str().map(str::to_string);
@@ -383,19 +382,49 @@ impl YouTube {
         Ok(Playlist::new(playlist_id.to_string(), title.to_string(), items))
     }
 
-    /// 差分を playlistItems.update で順に反映する。(playlist_item_id, video_id, 新position)
-    pub async fn write_back(&self, playlist_id: &str, updates: Vec<(String, String, usize)>) -> WriteOutcome {
-        let mut done = 0;
-        for (id, video_id, position) in &updates {
-            if let Err(error) = self.update_one(playlist_id, id, video_id, *position).await {
-                return WriteOutcome { done, error: Some(error) };
-            }
-            done += 1;
-        }
-        WriteOutcome { done, error: None }
+    async fn send_json(&self, req: reqwest::RequestBuilder, body: &Value) -> Result<Value, String> {
+        let resp = req.bearer_auth(self.bearer().await?).json(body).send().await.map_err(net_err)?;
+        Self::check(resp).await
     }
 
-    async fn update_one(&self, playlist_id: &str, id: &str, video_id: &str, position: usize) -> Result<(), String> {
+    /// playlists.insert: 新しいリストを非公開で作成し、その ID を返す。
+    pub async fn create_playlist(&self, title: &str) -> Result<String, String> {
+        let body = json!({ "snippet": { "title": title }, "status": { "privacyStatus": "private" } });
+        let req = self.http.post(PLAYLISTS).query(&[("part", "snippet,status")]);
+        let v = self.send_json(req, &body).await?;
+        v["id"].as_str().map(str::to_string).ok_or_else(|| "作成したリストの ID を取得できません".into())
+    }
+
+    /// playlistItems.insert: 指定位置に動画を追加し、できた playlistItem の ID を返す。
+    pub async fn insert_item(&self, playlist_id: &str, video_id: &str, position: usize) -> Result<String, String> {
+        let body = json!({ "snippet": {
+            "playlistId": playlist_id,
+            "position": position,
+            "resourceId": { "kind": "youtube#video", "videoId": video_id },
+        }});
+        let req = self.http.post(API).query(&[("part", "snippet")]);
+        let v = self.send_json(req, &body).await?;
+        v["id"].as_str().map(str::to_string).ok_or_else(|| "追加した動画の ID を取得できません".into())
+    }
+
+    /// playlistItems.delete: リストから動画を取り除く（動画そのものは削除されない）。
+    pub async fn delete_item(&self, item_id: &str) -> Result<(), String> {
+        let resp = self
+            .http
+            .delete(API)
+            .bearer_auth(self.bearer().await?)
+            .query(&[("id", item_id)])
+            .send()
+            .await
+            .map_err(net_err)?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        Self::check(resp).await.map(|_| ())
+    }
+
+    /// playlistItems.update: 動画の位置を変更する。
+    pub async fn move_item(&self, playlist_id: &str, id: &str, video_id: &str, position: usize) -> Result<(), String> {
         let body = json!({
             "id": id,
             "snippet": {
@@ -404,17 +433,47 @@ impl YouTube {
                 "position": position,
             }
         });
-        let resp = self
-            .http
-            .put(API)
-            .bearer_auth(self.bearer().await?)
-            .query(&[("part", "snippet")])
-            .json(&body)
-            .send()
-            .await
-            .map_err(net_err)?;
-        Self::check(resp).await.map(|_| ())
+        let req = self.http.put(API).query(&[("part", "snippet")]);
+        self.send_json(req, &body).await.map(|_| ())
     }
+}
+
+/// YouTube の動画 ID（11文字の英数字・ハイフン・アンダースコア）か。
+fn valid_video_id(id: &str) -> bool {
+    id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// oEmbed で動画のタイトルとサムネイルを取得する。API キーもログインも不要で、API のクォータを消費しない。
+pub async fn fetch_oembed(video_id: &str) -> Result<VideoInfo, String> {
+    if !valid_video_id(video_id) {
+        return Err("動画IDの形式が正しくありません".into());
+    }
+    let http = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let watch = format!("https://www.youtube.com/watch?v={video_id}");
+    let resp = http
+        .get("https://www.youtube.com/oembed")
+        .query(&[("url", watch.as_str()), ("format", "json")])
+        .send()
+        .await
+        .map_err(net_err)?;
+    let status = resp.status();
+    match status.as_u16() {
+        200 => {}
+        401 | 403 => return Err("この動画の情報を取得できません（非公開・限定公開、または埋め込みが禁止されている動画です）".into()),
+        404 => return Err("動画が見つかりません".into()),
+        _ => return Err(format!("動画情報の取得に失敗しました（HTTP {status}）")),
+    }
+    let v: Value = resp.json().await.map_err(net_err)?;
+    Ok(VideoInfo {
+        video_id: video_id.to_string(),
+        title: v["title"].as_str().unwrap_or(video_id).to_string(),
+        thumbnail_url: v["thumbnail_url"].as_str().unwrap_or_default().to_string(),
+        channel: v["author_name"].as_str().unwrap_or_default().to_string(),
+    })
 }
 
 fn best_thumbnail(thumbs: &Value) -> String {
@@ -427,7 +486,16 @@ fn best_thumbnail(thumbs: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_client_json, parse_playlist_id};
+    use super::{parse_client_json, parse_playlist_id, valid_video_id};
+
+    #[test]
+    fn video_id_validation() {
+        assert!(valid_video_id("dQw4w9WgXcQ"));
+        assert!(valid_video_id("a-b_c-d_e-f"));
+        assert!(!valid_video_id("dQw4w9WgXc"));      // 短い
+        assert!(!valid_video_id("dQw4w9WgXcQ&x=1")); // URL の断片
+        assert!(!valid_video_id("dQw4w9WgX/Q"));
+    }
 
     #[test]
     fn parses_desktop_client_json() {

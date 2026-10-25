@@ -1,12 +1,12 @@
 {
   "productName": "YouTube Playlist Player",
-  "version": "0.5.3-alpha",
+  "version": "0.6.0-alpha",
   "identifier": "local.youtube.playlistplayer",
   "build": { "frontendDist": "../web" },
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      { "title": "YouTube Playlist Player", "width": 1200, "height": 800, "useHttpsScheme": true, "dragDropEnabled": false }
+      { "title": "YouTube Playlist Player", "width": 1200, "height": 800, "useHttpsScheme": true, "dragDropEnabled": false, "visible": false }
     ],
     "security": { "csp": null }
   },

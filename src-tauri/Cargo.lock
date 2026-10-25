@@ -4801,7 +4801,7 @@ dependencies = [
 
 [[package]]
 name = "youtube-playlist-player"
-version = "0.5.3-alpha"
+version = "0.6.0-alpha"
 dependencies = [
  "rand 0.9.5",
  "reqwest 0.12.28",

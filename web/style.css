@@ -9,18 +9,26 @@ button.danger { background: #8a3b00; }
 .sep { width: 12px; }
 #status { margin-left: auto; font-size: 12px; color: #aaa; }
 main { flex: 1; display: flex; min-height: 0; }
-#stage { flex: 1; position: relative; padding: 8px; min-width: 0; }
-#modeBar { display: flex; gap: 4px; margin-bottom: 8px; }
-#treePane { width: 360px; overflow-y: auto; border-right: 1px solid #333; }
+#rightCol { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+#stage { flex: 1; position: relative; padding: 8px; min-width: 0; min-height: 0; overflow-y: auto; }
+#topbar { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; margin-bottom: 8px; min-width: 0; }
+#topbar button, #topbar #modeBar, #topbar #menuWrap { flex-shrink: 0; white-space: nowrap; }
+#topbar input { flex: 1 1 220px; min-width: 80px; padding: 6px; background: #121212; color: #eee; border: 1px solid #444; }
+#topbar #status { margin-left: 0; flex: 0 3 auto; min-width: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#modeBar { display: flex; gap: 4px; margin-right: 8px; }
+#treePane { width: 360px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid #333; }
+#treePane.collapsed { width: 36px; overflow: hidden; }
+#treePane.collapsed #tree, #treePane.collapsed #newListBtn { display: none; }
 
 /* 動画モード: 16:9 で大きく表示 */
-#stage.video-mode #playerBox { width: 100%; aspect-ratio: 16 / 9; max-height: calc(100vh - 120px); }
+#stage.video-mode #playerBox { width: 100%; aspect-ratio: 16 / 9; max-height: calc(100vh - 300px); }
 #stage.video-mode #musicUi { display: none; }
 /* 音楽モード: 規約遵守のため非表示にせず 200x200 を隅に配置 */
 #stage.music-mode #playerBox { position: absolute; right: 12px; bottom: 12px; width: 200px; height: 200px; z-index: 5; }
 #stage.music-mode #musicUi { display: flex; }
 #playerBox iframe, #player { width: 100%; height: 100%; }
-#musicUi { flex-direction: column; align-items: center; gap: 12px; padding-top: 20px; }
+#musicUi { flex-direction: row; align-items: flex-start; justify-content: center; gap: 24px; padding-top: 20px; }
+#musicMain { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 12px; }
 #musicThumb { width: min(360px, 60%); aspect-ratio: 1; object-fit: cover; border-radius: 6px; background: #000; }
 #musicTitle { font-size: 20px; text-align: center; max-width: 80%; }
 .controls button { font-size: 20px; margin: 0 6px; }
@@ -74,9 +82,10 @@ summary { cursor: pointer; color: #6af; }
 .note { font-size: 12px; color: #aaa; }
 code { background: #111; padding: 1px 4px; border-radius: 3px; }
 
-#ctxMenu { position: fixed; background: #2b2b2b; border: 1px solid #444; border-radius: 4px; z-index: 30; min-width: 140px; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
+#ctxMenu { white-space: nowrap; position: fixed; background: #2b2b2b; border: 1px solid #444; border-radius: 4px; z-index: 30; min-width: 140px; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
 #ctxMenu[hidden] { display: none; }
-#ctxMenu button { display: block; width: 100%; background: none; text-align: left; border-radius: 0; padding: 8px 12px; color: #f88; }
+#ctxMenu button { display: block; width: 100%; background: none; text-align: left; border-radius: 0; padding: 8px 12px; }
+#ctxRemove { color: #f88; }
 #ctxMenu button:hover { background: #3f3f3f; }
 button.primary { background: #1a5fb4; }
 button.primary:hover { background: #2a73d0; }
@@ -87,3 +96,74 @@ button.primary:hover { background: #2a73d0; }
 .vlist .handle { cursor: pointer; color: #888; padding: 4px 6px; font-size: 18px; line-height: 1; user-select: none; }
 .vlist .handle:hover { color: #fff; }
 .vlist li[draggable="true"] { opacity: .6; }
+#musicSide { width: 300px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
+#musicSide label { font-size: 12px; color: #aaa; }
+#musicSide input { width: 100%; padding: 6px; background: #121212; color: #eee; border: 1px solid #444; font-size: 12px; }
+.urlBtns { display: flex; gap: 6px; }
+#speedBar { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; color: #ccc; }
+#speedSel { background: #121212; color: #eee; border: 1px solid #444; padding: 4px; }
+
+#treeHead { position: sticky; top: 0; z-index: 2; padding: 6px 8px; background: #1b1b1b; border-bottom: 1px solid #333; }
+#treeHead { display: flex; gap: 6px; }
+#treeHead #newListBtn { flex: 1; }
+#treePane.collapsed #treeHead { padding: 6px 4px; }
+#treeToggle { padding: 6px 8px; }
+.badge { font-size: 10px; background: #2a6; color: #fff; padding: 0 6px; border-radius: 8px; white-space: nowrap; }
+.badge[hidden] { display: none; }
+.vlist li.isnew .title::after { content: "  NEW"; color: #6c6; font-size: 10px; font-weight: bold; }
+.ctx { position: fixed; background: #2b2b2b; border: 1px solid #444; border-radius: 4px; z-index: 40; min-width: 160px; white-space: nowrap; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
+.ctx button { display: block; width: 100%; background: none; text-align: left; border-radius: 0; padding: 8px 12px; }
+.ctx button:hover { background: #3f3f3f; }
+.ctx .danger-text { color: #f88; }
+#pickerDlg { width: min(460px, 92vw); }
+.pkVideo { font-size: 13px; color: #ccc; margin-bottom: 6px; }
+.pkList { max-height: 320px; overflow-y: auto; border: 1px solid #333; margin: 8px 0; }
+.pkMsg { padding: 10px; color: #aaa; font-size: 13px; }
+dialog label.pkRow, .pkRow { display: flex; gap: 8px; align-items: center; padding: 6px 8px; margin: 0; border-bottom: 1px solid #2a2a2a; cursor: pointer; }
+.pkRow:hover { background: #262626; }
+.pkRow .t { flex: 1; font-size: 13px; }
+.pkRow .c { color: #888; font-size: 12px; }
+.pkErr { color: #f96; cursor: default; }
+dialog .pkNew { display: flex; gap: 6px; }
+dialog .pkNew input[type=text] { flex: 1; width: auto; margin-top: 0; }
+dialog > input[type=text] { width: 100%; }
+#editorMain { min-height: 0; }
+
+#memoPane { flex: 0 0 auto; height: 170px; display: flex; flex-direction: column; border-top: 1px solid #333; background: #1b1b1b; padding: 6px 10px; gap: 4px; }
+.memoHead { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.memoHint { color: #888; font-size: 11px; }
+.grow { flex: 1; }
+.memoHead button { padding: 2px 8px; font-size: 12px; }
+#memoList { flex: 1; min-height: 0; overflow-y: auto; list-style: none; margin: 0; padding: 0; border: 1px solid #2c2c2c; background: #151515; }
+#memoList li { display: flex; gap: 8px; align-items: baseline; padding: 3px 8px; border-bottom: 1px solid #222; font-size: 13px; }
+#memoList .empty { color: #666; padding: 6px 8px; }
+#memoList a.ts { color: #6af; text-decoration: underline; cursor: pointer; font-variant-numeric: tabular-nums; white-space: nowrap; }
+#memoList .ext { cursor: pointer; color: #888; font-size: 11px; background: none; padding: 0 2px; }
+#memoList .vt { color: #888; font-size: 11px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#memoList .tx { flex: 1; white-space: pre-wrap; word-break: break-word; }
+#memoList .del { background: none; color: #888; padding: 0 4px; }
+#memoList .del:hover { color: #f66; }
+#memoList .edit { flex: 1; background: #121212; color: #eee; border: 1px solid #444; font: inherit; padding: 2px 4px; }
+.memoInput { display: flex; gap: 8px; align-items: stretch; }
+.memoInput label { font-size: 12px; color: #ccc; display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+#memoText { flex: 1; resize: none; background: #121212; color: #eee; border: 1px solid #444; padding: 4px 6px; font: inherit; font-size: 13px; }
+#tree > li > .plname.dropTarget { outline: 2px dashed #6af; outline-offset: -2px; background: #26364a; }
+#importDlg { width: min(460px, 92vw); }
+#pushDlg { width: min(540px, 94vw); }
+.pushList { margin: 6px 0; padding-left: 18px; max-height: 120px; overflow-y: auto; font-size: 13px; }
+.pushCost td:first-child { color: #aaa; }
+.pushOk { color: #7c7; }
+.pushWarn { color: #f88; }
+.pushOpt { display: flex; gap: 8px; align-items: flex-start; padding: 8px; border: 1px solid #444; border-radius: 4px; cursor: pointer; }
+.pushMsg { white-space: pre-wrap; }
+#pushDlg progress { width: 100%; }
+#finderDlg { width: min(640px, 94vw); }
+#finderDlg input[type=search] { width: 100%; box-sizing: border-box; }
+.fdBar { display: flex; gap: 8px; align-items: center; margin: 8px 0 0; flex-wrap: wrap; }
+.fdInfo { font-size: 12px; color: #999; margin-top: 6px; }
+.fdList { max-height: 50vh; }
+.fdList .no { width: 3em; text-align: right; color: #888; font-size: 12px; }
+.fdList .c { max-width: 12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#onceTag { color: #fa0; font-size: 12px; margin-left: 8px; }
+#onceTag[hidden] { display: none; }
+.vlist li.found { outline: 2px solid #f5c542; background: #3a3216; }

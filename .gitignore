@@ -4,3 +4,6 @@ src-tauri/target/
 src-tauri/gen/
 /youtube-playlist-player.exe
 demo/
+window.ini
+quota.json
+deferred.json

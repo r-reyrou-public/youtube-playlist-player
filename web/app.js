@@ -6,16 +6,18 @@ let summaries = [];          // [{id, title, item_count}]
 const cache = {};            // playlist_id -> Playlist（展開済みのみ）
 const expanded = new Set();
 let player = null, playerReady = false;
+let playOnce = false;   // 「この1本だけ再生」: 終わっても次へ進まない
+let nowSingle = null;   // URL から再生中の単発の動画 { video_id, title, thumbnail_url }（リストには未登録）
 let nowPlaylistId = null, nowVideoId = null;   // 再生中（並べ替えても video_id で追従）
 
-function status(msg) { $("status").textContent = msg; }
+function status(msg) { $("status").textContent = msg; $("status").title = msg; }
 
 const CALL_LIMIT_MS = 200000;   // バックエンドの上限（認可待ち180秒）を超えたら画面側で打ち切る
 let busy = 0;
 
 function setBusy(on) {
   busy += on ? 1 : -1;
-  document.querySelectorAll("header button[id], header [data-act]").forEach((b) => { if (!b.closest("#menu") && b.id !== "menuBtn") b.disabled = busy > 0; });
+  ["addBtn", "myBtn", "pushBtn"].forEach((id) => { $(id).disabled = busy > 0; });
 }
 
 async function call(cmd, args) {
@@ -49,10 +51,38 @@ function renderTree() {
     const head = document.createElement("div");
     head.className = "plname";
     head.title = "クリックで展開 / ダブルクリックで並べ替えウィンドウ";
-    head.innerHTML = '<span class="arrow"></span><span class="name"></span><span class="cnt"></span>';
+    head.innerHTML = '<span class="arrow"></span><span class="name"></span><span class="badge" hidden>新規</span><span class="cnt"></span>';
     head.querySelector(".arrow").textContent = expanded.has(s.id) ? "▼" : "▶";
     head.querySelector(".name").textContent = s.title;
+    head.querySelector(".badge").hidden = !s.is_new;
     head.querySelector(".cnt").textContent = s.item_count;
+    // リスト名を別のリスト名へドラッグすると、その動画を丸ごと取り込む（コピー）
+    head.draggable = true;
+    head.addEventListener("dragstart", (e) => {
+      dragList = s.id;
+      e.dataTransfer.effectAllowed = "copy";
+      e.dataTransfer.setData("text/plain", s.title);
+    });
+    head.addEventListener("dragend", () => {
+      dragList = null;
+      document.querySelectorAll(".dropTarget").forEach((el) => el.classList.remove("dropTarget"));
+    });
+    head.addEventListener("dragover", (e) => {
+      if (!dragList || dragList === s.id) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      head.classList.add("dropTarget");
+    });
+    head.addEventListener("dragleave", () => head.classList.remove("dropTarget"));
+    head.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      head.classList.remove("dropTarget");
+      const from = summaries.find((x) => x.id === dragList);
+      dragList = null;
+      if (!from || from.id === s.id) return;
+      if (!confirm(`「${from.title}」の動画（${from.item_count}本）を、「${s.title}」の末尾に取り込みます。\n元のリストは変わりません。YouTube への反映は Push で行います。\n続行しますか？`)) return;
+      await doImport(s, [from.id]);
+    });
     head.addEventListener("click", () => toggle(s.id));
     head.addEventListener("contextmenu", (e) => { e.preventDefault(); showCtx(e.clientX, e.clientY, s); });
     head.addEventListener("dblclick", () => call("open_editor", { playlistId: s.id, title: s.title }));
@@ -62,7 +92,20 @@ function renderTree() {
   }
 }
 
-let drag = null;   // ツリー上のドラッグ元 { id, idx }
+let drag = null;       // ツリー上の動画のドラッグ元 { id, idx }
+let dragList = null;   // ツリー上のリスト名のドラッグ元（リスト id）
+
+const importMsg = (target, r) =>
+  `${r.added}本を「${target.title}」に取り込みました` + (r.skipped ? `（すでに入っている ${r.skipped}本はスキップ）` : "") + "。Push で YouTube に反映されます";
+
+// sourceIds のリストの動画を、target のリストの末尾へ取り込む（ドラッグ操作用）
+async function doImport(target, sourceIds) {
+  for (const id of sourceIds) {
+    if (!(await call("get_playlist", { playlistId: id }))) return;   // 未取得なら取得（取得済みなら通信しない）
+  }
+  const r = await call("import_playlists", { target: target.id, sources: sourceIds });
+  if (r) status(importMsg(target, r));
+}
 
 function renderChildren(id) {
   const box = document.createElement("div");
@@ -74,6 +117,7 @@ function renderChildren(id) {
   pl.items.forEach((it, idx) => {
     const li = document.createElement("li");
     if (id === nowPlaylistId && it.video_id === nowVideoId) li.classList.add("playing");
+    if (it.is_new) li.classList.add("isnew");
     li.innerHTML = `<span class="handle" title="ドラッグして並べ替え">⠿</span><span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>`;
     li.querySelector("img").src = it.thumbnail_url;
     li.querySelector(".title").textContent = it.title;
@@ -91,6 +135,14 @@ function renderChildren(id) {
       document.querySelectorAll(".dragover").forEach((el) => el.classList.remove("dragover"));
     });
     li.addEventListener("dblclick", () => playVideo(id, it.video_id));
+    li.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      Common.showMenu(e.clientX, e.clientY, [
+        { label: "ここから連続再生", fn: () => playVideo(id, it.video_id) },
+        { label: "この1本だけ再生", fn: () => playVideo(id, it.video_id, 0, true) },
+        { label: "リストに保存…", fn: () => Common.openPicker(it) },
+      ]);
+    });
     li.addEventListener("dragstart", (e) => { drag = { id, idx }; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(idx)); });
     li.addEventListener("dragover", (e) => { if (drag && drag.id === id) { e.preventDefault(); li.classList.add("dragover"); } });
     li.addEventListener("dragleave", () => li.classList.remove("dragover"));
@@ -122,12 +174,38 @@ const hideCtx = () => { $("ctxMenu").hidden = true; };
 document.addEventListener("click", hideCtx);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideCtx(); });
 window.addEventListener("blur", hideCtx);
+$("ctxEdit").onclick = () => {
+  const s = ctxTarget;
+  hideCtx();
+  if (s) call("open_editor", { playlistId: s.id, title: s.title });
+};
+$("ctxFind").onclick = async () => {
+  const s = ctxTarget;
+  hideCtx();
+  if (!s) return;
+  Common.openFinder(s.id, async (it) => {
+    expanded.add(s.id);
+    if (!cache[s.id]) cache[s.id] = await call("get_playlist", { playlistId: s.id });
+    renderTree();
+    playVideo(s.id, it.video_id);
+    document.querySelector(".vlist li.playing")?.scrollIntoView({ block: "center" });
+  });
+};
+$("ctxImport").onclick = async () => {
+  const s = ctxTarget;
+  hideCtx();
+  if (!s) return;
+  const r = await Common.openImporter(s);
+  if (r) status(importMsg(s, r));
+};
 $("ctxRemove").onclick = async () => {
   const s = ctxTarget;
   hideCtx();
   if (!s) return;
-  if (!confirm(`「${s.title}」をこのアプリの一覧から削除します。
-YouTube 上のプレイリストは削除されません（「マイリスト取得」で再び表示されます）。`)) return;
+  const msg = s.is_new
+    ? `「${s.title}」はまだ YouTube に作成されていない新規リストです。削除すると内容は破棄されます。`
+    : `「${s.title}」をこのアプリの一覧から削除します。\nYouTube 上のプレイリストは削除されません（「マイリスト取得」で再び表示されます）。`;
+  if (!confirm(msg)) return;
   const list = await call("remove_playlist", { playlistId: s.id });
   if (!list) return;
   summaries = list;
@@ -150,12 +228,21 @@ async function toggle(id) {
 // 並べ替えウィンドウでの変更・書き戻しを反映（キャッシュ再取得のみ。API通信なし）
 listen("playlist-changed", async (e) => {
   const id = e.payload;
-  if (cache[id]) {
-    cache[id] = await invoke("get_playlist", { playlistId: id });
-    renderTree();
-  }
+  try {
+    if (cache[id]) cache[id] = await invoke("get_playlist", { playlistId: id });
+    summaries = await invoke("list_summaries");
+  } catch (_) { /* 削除済みのリストなど */ }
+  renderTree();
   refreshPush();
 });
+
+// 左ペイン最上部: 新規リスト（手元に作る。YouTube への作成は Push）
+$("newListBtn").onclick = async () => {
+  const name = await Common.askText("新規リスト", "リスト名");
+  if (!name) return;
+  const list = await call("create_playlist", { title: name });
+  if (list) { summaries = list; renderTree(); }
+};
 
 // ---- Push: 手元の変更を YouTube へ反映 ----
 async function refreshPush() {
@@ -166,26 +253,42 @@ async function refreshPush() {
 }
 
 $("pushBtn").onclick = async () => {
-  const { list, total } = await refreshPush();
-  if (!total) { alert("YouTube へ反映する変更はありません。"); return; }
-  const lines = list.map((p) => `・${p.title}: ${p.count}件`).join("\n");
-  const warn = total * 50 > 10000 ? "\n\n⚠ 1日の API 上限（10,000ユニット）を超えます。途中で失敗する可能性があります。" : "";
-  if (!confirm(`次の変更を YouTube に反映します（約${total * 50}ユニット消費）。\n\n${lines}${warn}\n\n対象は「手動並べ替え」設定のプレイリストです。続行しますか？`)) return;
-  let done = 0;
-  for (const p of list) {
-    const r = await call("write_back", { playlistId: p.id });
-    if (!r) { await refreshPush(); return; }   // 失敗したらそこで中断（エラーは表示済み）
-    done += r.updated;
-    if (cache[p.id]) { cache[p.id] = r.state; renderTree(); }
-  }
+  try { await Common.openPush(null); } catch (e) { alert(e); }
   await refreshPush();
-  status(`${done}件をYouTubeへ反映しました`);
 };
 
+// 前回、別日に回した未反映の変更があれば案内する（起動時）
+async function offerDeferred() {
+  const { total } = await refreshPush();
+  if (!total) return;
+  status(`前回の未反映の変更が${total}件あります`);
+  if (confirm(`前回反映しきれなかった変更が${total}件あります（約${total * 50}ユニット）。\nPush の画面を開きますか？`)) $("pushBtn").click();
+}
+
 $("addBtn").onclick = async () => {
-  const list = await call("add_playlist", { playlistInput: $("plInput").value });
+  const text = $("plInput").value.trim();
+  if (!text) return;
+  // list= を含む URL / ID はプレイリストとして追加。それ以外の動画の URL は再生のみ
+  const isPlaylist = /[?&]list=/.test(text) || /^(PL|UU|FL|OL|LL)[A-Za-z0-9_-]{10,}$/.test(text);
+  const v = isPlaylist ? null : Common.parseVideoInput(text);
+  if (v) { await playSingle(v); return; }
+  const list = await call("add_playlist", { playlistInput: text });
   if (list) { summaries = list; $("plInput").value = ""; renderTree(); }
 };
+
+// URL の動画を再生する（リストには登録しない）。同じ動画が再生中にもう一度押されたら、登録用のポップアップを出す。
+async function playSingle(v) {
+  if (nowSingle && nowSingle.video_id === v.videoId && nowVideoId === v.videoId) {
+    Common.openPicker(nowSingle);   // 任意のリストに登録（複数選択・新規リスト作成）
+    return;
+  }
+  if (!playerReady) { status("プレイヤーの準備ができていません"); return; }
+  const info = await call("video_info", { videoId: v.videoId });   // oEmbed（クォータ消費なし）
+  if (!info) return;
+  nowSingle = { video_id: info.video_id, title: info.title, thumbnail_url: info.thumbnail_url };
+  playVideo(null, v.videoId, v.start);
+  status("再生中（リスト未登録）。リストに登録するには、もう一度「追加」を押してください");
+}
 $("myBtn").onclick = async () => {
   const list = await call("list_my_playlists");
   if (list) { summaries = list; renderTree(); status(`${list.length}件のプレイリスト`); }
@@ -198,8 +301,12 @@ window.onYouTubeIframeAPIReady = () => {
     playerVars: { playsinline: 1, origin: location.origin },
     events: {
       onReady: () => { playerReady = true; },
-      onStateChange: (e) => { if (e.data === YT.PlayerState.ENDED) playRelative(1); },
-      onError: () => playRelative(1),   // 再生不可動画はスキップ
+      onStateChange: (e) => {
+        if (e.data === YT.PlayerState.ENDED && !playOnce) playRelative(1);
+        // 次の動画でも選択中の速度を維持する
+        if (e.data === YT.PlayerState.PLAYING && player.getPlaybackRate() !== rate) player.setPlaybackRate(rate);
+      },
+      onError: () => { if (!playOnce) playRelative(1); },   // 再生不可動画はスキップ（1本だけ再生のときは進まない）
     },
   });
 };
@@ -207,12 +314,20 @@ window.onYouTubeIframeAPIReady = () => {
 function queue() { return (cache[nowPlaylistId] || { items: [] }).items; }
 function currentIndex() { return queue().findIndex((i) => i.video_id === nowVideoId); }
 
-function playVideo(playlistId, videoId) {
+function currentItem() {
+  return queue()[currentIndex()] || (nowSingle && nowSingle.video_id === nowVideoId ? nowSingle : null);
+}
+
+function playVideo(playlistId, videoId, startSeconds = 0, once = false) {
   if (!playerReady) return;
+  playOnce = once;
+  $("onceTag").hidden = !once;
+  if (playlistId) nowSingle = null;   // リストの動画を再生したら、単発の動画の扱いは終わり
   nowPlaylistId = playlistId;
   nowVideoId = videoId;
-  player.loadVideoById(videoId);   // 並べ替え後の順序で自前キュー再生（IFrame APIのみ使用）
-  const it = queue()[currentIndex()];
+  $("musicUrl").value = `https://www.youtube.com/watch?v=${videoId}`;
+  player.loadVideoById({ videoId, startSeconds });   // 並べ替え後の順序で自前キュー再生（IFrame APIのみ使用）
+  const it = currentItem();
   $("musicTitle").textContent = it ? it.title : "";
   $("musicThumb").src = it ? it.thumbnail_url : "";
   renderTree();
@@ -337,3 +452,179 @@ $("openHelp").onclick = async () => {
   }
   $("helpDlg").showModal();
 };
+
+// ---- 再生速度（メインパネルの下） ----
+const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+let rate = 1;
+$("speedSel").innerHTML = SPEEDS.map((v) => `<option value="${v}">${v}x</option>`).join("");
+function applyRate() {
+  $("speedSel").value = String(rate);
+  if (playerReady) player.setPlaybackRate(rate);
+}
+$("speedSel").onchange = () => { rate = Number($("speedSel").value); applyRate(); };
+$("speedReset").onclick = () => { rate = 1; applyRate(); };
+applyRate();
+
+// ---- 音楽モード右側のURL ----
+$("urlCopy").onclick = async () => {
+  const url = $("musicUrl").value;
+  if (!url) return;
+  try { await navigator.clipboard.writeText(url); status("URLをコピーしました"); }
+  catch (e) { $("musicUrl").select(); document.execCommand("copy"); status("URLをコピーしました"); }
+};
+$("urlOpen").onclick = () => { const url = $("musicUrl").value; if (url) invoke("open_url", { url }); };
+
+// ---- 画面下部のメモ（タイムスタンプ付き / 自由記述） ----
+let memos = [];
+try { memos = JSON.parse(localStorage.getItem("memos") || "[]"); } catch (_) { memos = []; }
+const saveMemos = () => localStorage.setItem("memos", JSON.stringify(memos));
+
+function fmtTime(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+  const ss = String(s).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+const memoUrl = (m) => `https://www.youtube.com/watch?v=${m.videoId}&t=${m.time}s`;
+
+// タイムスタンプのリンクを押したとき: 再生中の動画ならその位置へ、そうでなければその動画をその位置から再生
+function jumpTo(m) {
+  if (!playerReady) { status("プレイヤーの準備ができていません"); return; }
+  if (m.videoId === nowVideoId) { player.seekTo(m.time, true); player.playVideo(); return; }
+  playVideo(m.playlistId, m.videoId, m.time);
+}
+
+function renderMemos() {
+  const ul = $("memoList");
+  ul.textContent = "";
+  if (!memos.length) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "メモはまだありません。動画を再生して、下の欄で Enter を押すと再生位置が記録されます。";
+    ul.appendChild(li);
+    return;
+  }
+  for (const m of memos) {
+    const li = document.createElement("li");
+    if (m.time !== null && m.videoId) {
+      const a = document.createElement("a");
+      a.className = "ts";
+      a.href = memoUrl(m);
+      a.textContent = fmtTime(m.time);
+      a.title = "クリックでこの位置から再生";
+      a.addEventListener("click", (e) => { e.preventDefault(); jumpTo(m); });
+      li.appendChild(a);
+      const ext = document.createElement("button");
+      ext.className = "ext";
+      ext.textContent = "↗";
+      ext.title = "ブラウザで YouTube を開く";
+      ext.addEventListener("click", () => invoke("open_url", { url: memoUrl(m) }));
+      li.appendChild(ext);
+      if (m.title) {
+        const vt = document.createElement("span");
+        vt.className = "vt";
+        vt.textContent = m.title;
+        vt.title = m.title;
+        li.appendChild(vt);
+      }
+    }
+    const tx = document.createElement("span");
+    tx.className = "tx";
+    tx.textContent = m.text;
+    tx.title = "ダブルクリックで編集";
+    tx.addEventListener("dblclick", () => editMemo(m, tx));
+    li.appendChild(tx);
+    const del = document.createElement("button");
+    del.className = "del";
+    del.textContent = "×";
+    del.title = "このメモを削除";
+    del.addEventListener("click", () => { memos = memos.filter((x) => x.id !== m.id); saveMemos(); renderMemos(); });
+    li.appendChild(del);
+    ul.appendChild(li);
+  }
+  ul.scrollTop = ul.scrollHeight;
+}
+
+// 自由記述の部分をその場で編集（Enter で確定、Esc で取り消し）
+function editMemo(m, span) {
+  const input = document.createElement("input");
+  input.className = "edit";
+  input.value = m.text;
+  span.replaceWith(input);
+  input.focus();
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    if (save) { m.text = input.value; saveMemos(); }
+    renderMemos();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.keyCode === 229) return;   // 日本語入力の変換確定の Enter は無視
+    if (e.key === "Enter") finish(true);
+    if (e.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
+function addMemo() {
+  const text = $("memoText").value.trim();
+  const playing = playerReady && nowVideoId !== null;
+  const stamp = $("memoStamp").checked && playing;
+  if (!stamp && !text) { status(playing ? "メモを入力してください" : "再生中の動画がありません。メモを入力してください"); return; }
+  const cur = currentItem();
+  memos.push({
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    videoId: stamp ? nowVideoId : null,
+    playlistId: stamp ? nowPlaylistId : null,
+    title: stamp && cur ? cur.title : "",
+    time: stamp ? Math.floor(player.getCurrentTime() || 0) : null,
+    text,
+    ts: Date.now(),
+  });
+  saveMemos();
+  $("memoText").value = "";
+  renderMemos();
+}
+
+$("memoAdd").onclick = addMemo;
+$("memoText").addEventListener("keydown", (e) => {
+  // 日本語入力の変換確定の Enter（isComposing / keyCode 229）では追加しない。Shift+Enter は改行
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+    e.preventDefault();
+    addMemo();
+  }
+});
+
+$("memoCopy").onclick = async () => {
+  if (!memos.length) return;
+  const lines = memos.map((m) => {
+    const head = m.time !== null && m.videoId ? `[${fmtTime(m.time)}] ${memoUrl(m)}` : "";
+    const title = m.title ? `「${m.title}」` : "";
+    return [head, title, m.text].filter(Boolean).join(" ");
+  });
+  try { await navigator.clipboard.writeText(lines.join("\n")); status("メモをコピーしました"); }
+  catch (_) { status("コピーできませんでした"); }
+};
+$("memoClear").onclick = () => {
+  if (!memos.length) return;
+  if (!confirm(`メモ ${memos.length} 件をすべて削除します。よろしいですか？`)) return;
+  memos = [];
+  saveMemos();
+  renderMemos();
+};
+renderMemos();
+
+// ---- 左ペイン（リスト）を畳む ----
+function setTreeCollapsed(c) {
+  $("treePane").classList.toggle("collapsed", c);
+  $("treeToggle").textContent = c ? "»" : "«";
+  localStorage.setItem("treeCollapsed", c ? "1" : "0");
+}
+$("treeToggle").onclick = () => setTreeCollapsed(!$("treePane").classList.contains("collapsed"));
+setTreeCollapsed(localStorage.getItem("treeCollapsed") === "1");
+
+// 起動時: 前回保存した未反映の変更（別日に回したもの）を読み込んで案内する
+(async () => {
+  try { summaries = await invoke("list_summaries"); renderTree(); } catch (_) {}
+  setTimeout(offerDeferred, 300);
+})();
