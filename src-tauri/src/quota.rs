@@ -166,6 +166,25 @@ pub fn save_deferred(d: &Deferred) {
     }
 }
 
+fn cache_path() -> PathBuf {
+    crate::youtube::storage_dir().join("cache.json")
+}
+
+/// 前回取得した内容（一覧と取得済みのリスト）。毎回取得し直さずに表示するために保存する。
+pub fn save_cache_json(json: &str) {
+    let _io = IO.lock().unwrap();
+    let p = cache_path();
+    let tmp = p.with_extension("json.tmp");
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
+pub fn load_cache() -> Option<Deferred> {
+    let _io = IO.lock().unwrap();
+    serde_json::from_str(&std::fs::read_to_string(cache_path()).ok()?).ok()
+}
+
 pub fn load_deferred() -> Option<Deferred> {
     let _io = IO.lock().unwrap();
     let d: Deferred = serde_json::from_str(&std::fs::read_to_string(deferred_path()).ok()?).ok()?;

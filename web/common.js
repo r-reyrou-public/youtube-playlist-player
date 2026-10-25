@@ -39,7 +39,8 @@ const Common = (() => {
   // ---- 右クリックメニュー ----
   let menu = null;
   function hideMenu() { if (menu) { menu.remove(); menu = null; } }
-  function showMenu(x, y, items) {
+  // up: true なら y をメニューの下端として、上向きに開く（画面下部のボタン用）
+  function showMenu(x, y, items, up = false) {
     hideMenu();
     menu = el("div", "ctx");
     for (const it of items) {
@@ -49,7 +50,8 @@ const Common = (() => {
     }
     document.body.appendChild(menu);
     menu.style.left = `${Math.max(0, Math.min(x, window.innerWidth - menu.offsetWidth - 4))}px`;
-    menu.style.top = `${Math.max(0, Math.min(y, window.innerHeight - menu.offsetHeight - 4))}px`;
+    const top = up ? y - menu.offsetHeight : y;
+    menu.style.top = `${Math.max(0, Math.min(top, window.innerHeight - menu.offsetHeight - 4))}px`;
     setTimeout(() => document.addEventListener("click", hideMenu, { once: true }), 0);
   }
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideMenu(); });
@@ -347,7 +349,7 @@ const Common = (() => {
 
     const resetAt = Math.floor(Date.now() / 1000) + plan.reset_in_secs;
     const ul = el("ul", "pushList");
-    for (const p of plan.lists) ul.appendChild(el("li", "", `${p.title}: ${p.count}件`));
+    for (const p of plan.lists) ul.appendChild(el("li", "", p.deleting ? `${p.title}: リストを削除` : `${p.title}: ${p.count}件`));
     body.appendChild(ul);
 
     const tbl = el("table", "pushCost");

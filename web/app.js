@@ -17,7 +17,7 @@ let busy = 0;
 
 function setBusy(on) {
   busy += on ? 1 : -1;
-  ["addBtn", "myBtn", "pushBtn"].forEach((id) => { $(id).disabled = busy > 0; });
+  ["addBtn", "copyBtn", "myBtn", "pushBtn"].forEach((id) => { $(id).disabled = busy > 0; });
 }
 
 async function call(cmd, args) {
@@ -50,7 +50,8 @@ function renderTree() {
     const li = document.createElement("li");
     const head = document.createElement("div");
     head.className = "plname";
-    head.title = "クリックで展開 / ダブルクリックで並べ替えウィンドウ";
+    const got = cache[s.id] && cache[s.id].fetched_at;
+    head.title = "クリックで展開 / ダブルクリックで並べ替えウィンドウ" + (got ? `\n取得: ${new Date(got * 1000).toLocaleString("ja-JP")} 時点（右クリックで最新を取得）` : "");
     head.innerHTML = '<span class="arrow"></span><span class="name"></span><span class="badge" hidden>新規</span><span class="cnt"></span>';
     head.querySelector(".arrow").textContent = expanded.has(s.id) ? "▼" : "▶";
     head.querySelector(".name").textContent = s.title;
@@ -191,6 +192,21 @@ $("ctxFind").onclick = async () => {
     document.querySelector(".vlist li.playing")?.scrollIntoView({ block: "center" });
   });
 };
+$("ctxRefresh").onclick = async () => {
+  const s = ctxTarget;
+  hideCtx();
+  if (!s) return;
+  if (s.is_new) { alert("まだ YouTube に作成されていない新規リストは、取得し直せません。"); return; }
+  const n = await invoke("pending_count", { playlistId: s.id });
+  if (n && !confirm(`「${s.title}」には YouTube に未反映の変更が${n}件あります。最新を取得すると、これらの変更は破棄されます。続行しますか？`)) return;
+  const pl = await call("refresh_playlist", { playlistId: s.id });
+  if (!pl) return;
+  cache[s.id] = pl;
+  summaries = await invoke("list_summaries");
+  renderTree();
+  refreshPush();
+  status(`「${s.title}」を最新の内容に更新しました`);
+};
 $("ctxImport").onclick = async () => {
   const s = ctxTarget;
   hideCtx();
@@ -276,6 +292,19 @@ $("addBtn").onclick = async () => {
   if (list) { summaries = list; $("plInput").value = ""; renderTree(); }
 };
 
+$("copyBtn").onclick = async () => {
+  const text = $("plInput").value.trim();
+  if (!text) { status("コピーする公開リストの URL を入力してください"); return; }
+  if (!/[?&]list=/.test(text) && !/^(PL|UU|FL|OL|LL)[A-Za-z0-9_-]{10,}$/.test(text)) { status("プレイリストの URL を入力してください"); return; }
+  const r = await call("copy_public_playlist", { playlistInput: text });
+  if (!r) return;
+  summaries = r.summaries;
+  $("plInput").value = "";
+  renderTree();
+  refreshPush();
+  status(`「${r.title}」を ${r.count}本のコピーとして作成しました。Push で YouTube に作成されます（約${(r.count + 1) * 50}ユニット）`);
+};
+
 // URL の動画を再生する（リストには登録しない）。同じ動画が再生中にもう一度押されたら、登録用のポップアップを出す。
 async function playSingle(v) {
   if (nowSingle && nowSingle.video_id === v.videoId && nowVideoId === v.videoId) {
@@ -302,11 +331,11 @@ window.onYouTubeIframeAPIReady = () => {
     events: {
       onReady: () => { playerReady = true; },
       onStateChange: (e) => {
-        if (e.data === YT.PlayerState.ENDED && !playOnce) playRelative(1);
+        if (e.data === YT.PlayerState.ENDED && (!playOnce || settings.repeat === "one")) advance(1, true);
         // 次の動画でも選択中の速度を維持する
         if (e.data === YT.PlayerState.PLAYING && player.getPlaybackRate() !== rate) player.setPlaybackRate(rate);
       },
-      onError: () => { if (!playOnce) playRelative(1); },   // 再生不可動画はスキップ（1本だけ再生のときは進まない）
+      onError: () => { if (!playOnce) advance(1, true, true); },   // 再生不可動画はスキップ（1本だけ再生のときは進まない。単一動画リピートでも同じ動画を繰り返さない）
     },
   });
 };
@@ -320,6 +349,13 @@ function currentItem() {
 
 function playVideo(playlistId, videoId, startSeconds = 0, once = false) {
   if (!playerReady) return;
+  // 戻る操作のために履歴を残す（シャッフル中の「前へ」で使う）
+  if (navBack) navBack = false;
+  else if (nowPlaylistId && nowVideoId !== null && !(nowPlaylistId === playlistId && nowVideoId === videoId)) {
+    history.push({ pl: nowPlaylistId, vid: nowVideoId });
+    if (history.length > 200) history.shift();
+  }
+  if (playlistId) bag.add(key(playlistId, videoId));
   playOnce = once;
   $("onceTag").hidden = !once;
   if (playlistId) nowSingle = null;   // リストの動画を再生したら、単発の動画の扱いは終わり
@@ -333,16 +369,77 @@ function playVideo(playlistId, videoId, startSeconds = 0, once = false) {
   renderTree();
 }
 
-function playRelative(d) {
-  const q = queue();
-  if (!q.length) return;
-  const i = currentIndex();
-  if (!settings.loop && i + d >= q.length) return;   // ループ無効なら末尾で停止
-  playVideo(nowPlaylistId, q[(i + d + q.length) % q.length].video_id);
+// ---- リピート / シャッフル ----
+const REPEATS = [
+  { v: "off", mark: "➡", name: "リピートなし" },
+  { v: "all", mark: "🌐🔁", name: "全リストリピート" },
+  { v: "list", mark: "📃🔁", name: "単一リストリピート" },
+  { v: "one", mark: "🔂", name: "単一動画リピート" },
+];
+const SHUFFLES = [
+  { v: "off", mark: "➡", name: "シャッフルなし" },
+  { v: "all", mark: "🌐🔀", name: "全リストシャッフル" },
+  { v: "list", mark: "📃🔀", name: "単一リストシャッフル" },
+];
+let bag = new Set();      // シャッフルで今回の周回にすでに再生した動画（全部再生するまで重複させない）
+let history = [];         // 再生した順（シャッフル中の「前へ」用）
+let navBack = false;
+const key = (pl, vid) => `${pl}|${vid}`;
+
+function shufflePool() {
+  const lists = settings.shuffle === "all" ? Object.values(cache) : (cache[nowPlaylistId] ? [cache[nowPlaylistId]] : []);
+  return lists.flatMap((p) => p.items.map((i) => ({ pl: p.playlist_id, vid: i.video_id })));
 }
 
-$("prevBtn").onclick = () => playRelative(-1);
-$("nextBtn").onclick = () => playRelative(1);
+function pickShuffle() {
+  const pool = shufflePool();
+  if (!pool.length) return null;
+  const fresh = () => pool.filter((x) => !bag.has(key(x.pl, x.vid)));
+  let cand = fresh();
+  if (!cand.length) {
+    if (settings.repeat === "off") return null;   // リピートなしなら、全部再生したら終わる
+    bag.clear();
+    if (nowPlaylistId && nowVideoId !== null) bag.add(key(nowPlaylistId, nowVideoId));
+    cand = fresh();
+    if (!cand.length) cand = pool;   // 1本しかないとき
+  }
+  return cand[Math.floor(Math.random() * cand.length)];
+}
+
+// 次（d=1）/ 前（d=-1）に再生する動画。無ければ null（停止）
+function nextTarget(d) {
+  if (settings.shuffle !== "off") {
+    if (d < 0) return history.length ? { back: true, ...history[history.length - 1] } : null;
+    return pickShuffle();
+  }
+  const q = queue();
+  if (!q.length) return null;
+  const j = currentIndex() + d;
+  if (j >= 0 && j < q.length) return { pl: nowPlaylistId, vid: q[j].video_id };
+  if (settings.repeat === "all") {
+    const order = summaries.map((s) => s.id).filter((id) => cache[id] && cache[id].items.length);
+    const at = order.indexOf(nowPlaylistId);
+    if (at >= 0) {
+      const its = cache[order[(at + d + order.length) % order.length]].items;
+      return { pl: order[(at + d + order.length) % order.length], vid: (d > 0 ? its[0] : its[its.length - 1]).video_id };
+    }
+  }
+  if (settings.repeat === "list" || settings.repeat === "one") return { pl: nowPlaylistId, vid: q[(j + q.length) % q.length].video_id };
+  return null;
+}
+
+// auto: 再生が終わって自動で進むとき。ignoreOne: 単一動画リピートを無視する（再生エラー時）
+function advance(d, auto = false, ignoreOne = false) {
+  if (nowVideoId === null) return;
+  if (auto && settings.repeat === "one" && !ignoreOne) { playVideo(nowPlaylistId, nowVideoId, 0, playOnce); return; }
+  const t = nextTarget(d);
+  if (!t) { if (auto) status("最後まで再生しました"); return; }
+  if (t.back) { history.pop(); navBack = true; }
+  playVideo(t.pl, t.vid);
+}
+
+$("prevBtn").onclick = () => advance(-1);
+$("nextBtn").onclick = () => advance(1);
 $("playBtn").onclick = () => {
   if (!playerReady) return;
   if (nowVideoId === null) { const q = Object.values(cache)[0]; if (q && q.items.length) playVideo(q.playlist_id, q.items[0].video_id); return; }
@@ -374,15 +471,52 @@ setInterval(() => {
 }, 500);
 
 // ---- ハンバーガーメニュー / 設定 / ヘルプ ----
-const settings = Object.assign({ mode: "video", loop: true },
+const settings = Object.assign({ mode: "video", loop: true, shuffle: "off" },
   JSON.parse(localStorage.getItem("settings") || "{}"));
+if (!settings.repeat) settings.repeat = settings.loop === false ? "off" : "list";   // 旧設定「ループ」からの引き継ぎ
 const saveSettings = () => localStorage.setItem("settings", JSON.stringify(settings));
 
 setMode(settings.mode === "music");
 $("setMode").value = settings.mode;
-$("setLoop").checked = settings.loop;
 $("setMode").onchange = () => { settings.mode = $("setMode").value; saveSettings(); setMode(settings.mode === "music"); };
-$("setLoop").onchange = () => { settings.loop = $("setLoop").checked; saveSettings(); };
+
+// ---- 動画下部: リピート / シャッフルのプルダウン ----
+function updatePlayModeUi() {
+  const r = REPEATS.find((x) => x.v === settings.repeat) || REPEATS[0];
+  const s = SHUFFLES.find((x) => x.v === settings.shuffle) || SHUFFLES[0];
+  $("repeatBtn").textContent = `${r.mark} ${r.name} ▾`;
+  $("shuffleBtn").textContent = `${s.mark} ${s.name} ▾`;
+  $("repeatBtn").classList.toggle("active", r.v !== "off");
+  $("shuffleBtn").classList.toggle("active", s.v !== "off");
+}
+
+// 「全リスト」は、読み込み済み（ツリーで開いたことがある）のリストだけが対象。未取得のリストは含めない
+const loadedCount = () => Object.values(cache).filter((p) => p.items.length).length;
+const scopeNote = () => status(`全リストの対象: 読み込み済みの${loadedCount()}リスト（未取得のリストは含まれません）`);
+
+function openModeMenu(btn, options, current, apply) {
+  const r = btn.getBoundingClientRect();
+  Common.showMenu(r.left, r.top - 4, options.map((o) => ({
+    label: `${o.v === current ? "✓" : "\u3000"} ${o.mark} ${o.name}`,
+    fn: () => apply(o.v),
+  })), true);
+}
+
+$("repeatBtn").onclick = () => openModeMenu($("repeatBtn"), REPEATS, settings.repeat, (v) => {
+  settings.repeat = v;
+  saveSettings();
+  updatePlayModeUi();
+  if (v === "all") scopeNote();
+});
+$("shuffleBtn").onclick = () => openModeMenu($("shuffleBtn"), SHUFFLES, settings.shuffle, (v) => {
+  settings.shuffle = v;
+  saveSettings();
+  bag.clear();
+  if (nowPlaylistId && nowVideoId !== null) bag.add(key(nowPlaylistId, nowVideoId));
+  updatePlayModeUi();
+  if (v === "all") scopeNote();
+});
+updatePlayModeUi();
 
 const menu = $("menu");
 $("menuBtn").onclick = (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; };
@@ -626,5 +760,6 @@ setTreeCollapsed(localStorage.getItem("treeCollapsed") === "1");
 // 起動時: 前回保存した未反映の変更（別日に回したもの）を読み込んで案内する
 (async () => {
   try { summaries = await invoke("list_summaries"); renderTree(); } catch (_) {}
+  if (summaries.length) status("前回取得した内容を表示しています（最新にするには「マイリスト取得」、リストは右クリック「YouTubeから最新を取得」）");
   setTimeout(offerDeferred, 300);
 })();

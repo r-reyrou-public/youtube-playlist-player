@@ -39,6 +39,8 @@ pub struct VideoInfo {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     CreatePlaylist,
+    /// リストそのものを YouTube から削除する。
+    DeletePlaylist,
     Delete { item_id: String },
     Insert { item_id: String, video_id: String, position: usize },
     Move { item_id: String, video_id: String, position: usize },
@@ -52,12 +54,18 @@ pub struct Playlist {
     pub remote_id: Option<String>,
     pub title: String,
     pub items: Vec<PlaylistItem>,
+    /// YouTube から取得した時刻（UNIX 秒）。手元で作った新規リストは 0。
+    #[serde(default)]
+    pub fetched_at: i64,
     /// YouTube 側の現在の並び（playlist_item_id）。Push の各操作の成功ごとに更新する。
     #[serde(default)]
     server: Vec<String>,
     /// 画面から取り除いたが、まだ YouTube からは削除していない動画（「元に戻す」用）。
     #[serde(default)]
     removed: Vec<PlaylistItem>,
+    /// 一覧から削除済み。Push で YouTube からも削除する。
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 impl Playlist {
@@ -69,8 +77,10 @@ impl Playlist {
             playlist_id,
             title,
             items,
+            fetched_at: crate::quota::now_secs(),
             server,
             removed: Vec::new(),
+            deleted: false,
         };
         p.refresh();
         p
@@ -78,7 +88,7 @@ impl Playlist {
 
     /// 手元だけで作る新規リスト。Push で YouTube に作成される。
     pub fn new_local(playlist_id: String, title: String) -> Self {
-        Playlist { playlist_id, remote_id: None, title, items: Vec::new(), server: Vec::new(), removed: Vec::new() }
+        Playlist { playlist_id, remote_id: None, title, items: Vec::new(), fetched_at: 0, server: Vec::new(), removed: Vec::new(), deleted: false }
     }
 
     /// 現在位置・サーバー上の位置・新規フラグを再計算する。
@@ -202,6 +212,12 @@ impl Playlist {
     /// すでに目標位置にある動画はスキップする。確定済みの前方は後続の操作で乱れない。
     pub fn plan(&self) -> Vec<Op> {
         let mut ops = Vec::new();
+        if self.deleted {
+            if self.remote_id.is_some() {
+                ops.push(Op::DeletePlaylist);
+            }
+            return ops;
+        }
         if self.remote_id.is_none() {
             ops.push(Op::CreatePlaylist);
         }
@@ -242,6 +258,7 @@ impl Playlist {
     pub fn apply(&mut self, op: &Op, result_id: Option<String>) {
         match op {
             Op::CreatePlaylist => self.remote_id = result_id,
+            Op::DeletePlaylist => {} // 呼び出し側が、このリストを状態から取り除く
             Op::Delete { item_id } => {
                 self.server.retain(|id| id != item_id);
                 self.removed.retain(|i| &i.playlist_item_id != item_id);
@@ -309,6 +326,16 @@ mod tests {
 
     fn ids(pl: &Playlist) -> Vec<String> {
         pl.items.iter().map(|i| i.playlist_item_id.clone()).collect()
+    }
+
+    #[test]
+    fn deleted_list_plans_only_playlist_delete() {
+        let mut pl = make(5);
+        pl.deleted = true;
+        assert_eq!(pl.plan(), vec![Op::DeletePlaylist]);
+        let mut local = Playlist::new_local("local-1".into(), "x".into());
+        local.deleted = true;
+        assert!(local.plan().is_empty());
     }
 
     #[test]

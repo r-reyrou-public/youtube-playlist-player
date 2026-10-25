@@ -9,6 +9,7 @@
 <div id="ctxMenu" hidden>
   <button id="ctxEdit">編集（並べ替え）</button>
   <button id="ctxFind">検索・並べ替え…</button>
+  <button id="ctxRefresh">YouTubeから最新を取得</button>
   <button id="ctxImport">他のリストの動画を取り込む…</button>
   <button id="ctxRemove">削除（一覧から外す）</button>
 </div>
@@ -19,7 +20,6 @@
     <label>起動時の表示モード
       <select id="setMode"><option value="video">動画モード</option><option value="music">音楽モード</option></select>
     </label>
-    <label><input type="checkbox" id="setLoop"> 最後まで再生したら先頭に戻る（ループ）</label>
   </fieldset>
   <fieldset>
     <legend>YouTube API 認証情報 <span id="credState"></span></legend>
@@ -84,6 +84,7 @@
         <input id="plInput" placeholder="プレイリストまたは動画の URL">
         <span id="status"></span>
         <button id="addBtn" title="プレイリスト: 一覧に追加 / 動画: 再生（同じ URL でもう一度押すとリストに登録）">追加</button>
+        <button id="copyBtn" title="公開リストの URL から、全動画を入れた自分の新規リストを作る（Push で YouTube に作成）">丸ごとコピー</button>
         <button id="myBtn">マイリスト取得</button>
         <button id="pushBtn" class="danger" title="手元の変更をYouTubeへ反映します">Push (0)</button>
         <div id="menuWrap">
@@ -98,11 +99,6 @@
       <div id="musicMain">
         <img id="musicThumb" alt="">
         <div id="musicTitle">-</div>
-        <div class="controls">
-          <button id="prevBtn">⏮</button>
-          <button id="playBtn">⏯</button>
-          <button id="nextBtn">⏭</button>
-        </div>
         <input id="seek" type="range" min="0" max="1000" value="0">
         <div id="times">0:00 / 0:00</div>
       </div>
@@ -117,6 +113,14 @@
     </div>
     <div id="playerBox"><div id="player"></div></div>
     <div id="speedBar">
+      <div class="controls">
+        <button id="prevBtn" title="前の動画">⏮</button>
+        <button id="playBtn" title="再生 / 一時停止">⏯</button>
+        <button id="nextBtn" title="次の動画">⏭</button>
+      </div>
+      <button id="repeatBtn" class="playMode" title="リピートの種類を選びます"></button>
+      <button id="shuffleBtn" class="playMode" title="シャッフルの種類を選びます"></button>
+      <span class="sepv"></span>
       <span>再生速度</span>
       <select id="speedSel"></select>
       <button id="speedReset" title="再生速度を 1x に戻します">リセット</button>

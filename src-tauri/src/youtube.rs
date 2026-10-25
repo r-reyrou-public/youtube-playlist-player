@@ -15,6 +15,7 @@ use crate::model::{Playlist, PlaylistItem, VideoInfo};
 
 const SCOPE: &str = "https://www.googleapis.com/auth/youtube";
 const API: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
+const CHANNELS: &str = "https://www.googleapis.com/youtube/v3/channels";
 const PLAYLISTS: &str = "https://www.googleapis.com/youtube/v3/playlists";
 
 /// 接続確立の上限。
@@ -334,8 +335,27 @@ impl YouTube {
         Ok(out)
     }
 
+    /// 自分のプレイリスト全件。playlists.list には出てこない標準のリスト（高く評価した動画・お気に入り・アップロード）も、
+    /// channels.list（1ユニット）の relatedPlaylists から追加する。標準のリストの取得に失敗しても、通常のリストは返す。
     pub async fn my_playlists(&self) -> Result<Vec<PlaylistSummary>, String> {
-        self.fetch_summaries(("mine", "true")).await
+        let mut out = self.fetch_summaries(("mine", "true")).await?;
+        if let Ok(body) = self.get_json(CHANNELS, &[("part", "contentDetails"), ("mine", "true")]).await {
+            let related = &body["items"][0]["contentDetails"]["relatedPlaylists"];
+            for (key, title) in [("likes", "高く評価した動画"), ("favorites", "お気に入り"), ("uploads", "アップロード動画")] {
+                let Some(id) = related[key].as_str().filter(|id| !id.is_empty()) else { continue };
+                if out.iter().any(|s| s.id == id) {
+                    continue;
+                }
+                // 一覧に出てこない場合でも、動画の取得（playlistItems）はできるので、既定の名前で追加する
+                let found = self.fetch_summaries(("id", id)).await.ok().and_then(|mut v| v.pop());
+                let mut s = found.unwrap_or(PlaylistSummary { id: id.to_string(), title: String::new(), item_count: 0, is_new: false });
+                if s.title.is_empty() {
+                    s.title = title.to_string();
+                }
+                out.push(s);
+            }
+        }
+        Ok(out)
     }
 
     pub async fn playlist_summary(&self, id: &str) -> Result<PlaylistSummary, String> {
@@ -405,6 +425,22 @@ impl YouTube {
         let req = self.http.post(API).query(&[("part", "snippet")]);
         let v = self.send_json(req, &body).await?;
         v["id"].as_str().map(str::to_string).ok_or_else(|| "追加した動画の ID を取得できません".into())
+    }
+
+    /// playlists.delete: リストそのものを削除する。
+    pub async fn delete_playlist(&self, playlist_id: &str) -> Result<(), String> {
+        let resp = self
+            .http
+            .delete(PLAYLISTS)
+            .bearer_auth(self.bearer().await?)
+            .query(&[("id", playlist_id)])
+            .send()
+            .await
+            .map_err(net_err)?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        Self::check(resp).await.map(|_| ())
     }
 
     /// playlistItems.delete: リストから動画を取り除く（動画そのものは削除されない）。
