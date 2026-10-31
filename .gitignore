@@ -8,3 +8,5 @@ window.ini
 quota.json
 deferred.json
 cache.json
+
+*.bak

@@ -29,6 +29,24 @@ pub struct PlaylistItem {
 }
 
 /// リストへ追加する動画の情報。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DuplicateItemInfo {
+    pub playlist_item_id: String,
+    pub position: usize,
+    pub is_duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DuplicateGroup {
+    pub video_id: String,
+    pub title: String,
+    pub thumbnail_url: String,
+    pub channel: String,
+    pub playlist_id: String,
+    pub playlist_title: String,
+    pub items: Vec<DuplicateItemInfo>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VideoInfo {
     pub video_id: String,
@@ -214,6 +232,62 @@ impl Playlist {
             n += 1;
         }
         self.refresh();
+        n
+    }
+
+    /// リスト内の重複動画を抽出し、グループ化して返す。
+    pub fn find_duplicates(&self) -> Vec<DuplicateGroup> {
+        let mut map: std::collections::HashMap<&str, Vec<&PlaylistItem>> = std::collections::HashMap::new();
+        for it in &self.items {
+            map.entry(it.video_id.as_str()).or_default().push(it);
+        }
+        let mut groups = Vec::new();
+        let mut seen = HashSet::new();
+        for it in &self.items {
+            if seen.insert(it.video_id.as_str()) {
+                if let Some(dupes) = map.get(it.video_id.as_str()) {
+                    if dupes.len() > 1 {
+                        groups.push(DuplicateGroup {
+                            video_id: it.video_id.clone(),
+                            title: it.title.clone(),
+                            thumbnail_url: it.thumbnail_url.clone(),
+                            channel: it.channel.clone(),
+                            playlist_id: self.playlist_id.clone(),
+                            playlist_title: self.title.clone(),
+                            items: dupes
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, item)| DuplicateItemInfo {
+                                    playlist_item_id: item.playlist_item_id.clone(),
+                                    position: item.current_position,
+                                    is_duplicate: idx > 0,
+                                })
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        }
+        groups
+    }
+
+    /// リスト内の重複動画（同じ video_id を持つ2回目以降のアイテム）を削除する。削除した件数を返す。
+    pub fn dedup(&mut self) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        let mut n = 0;
+        let mut pos = 0;
+        while pos < self.items.len() {
+            if seen.contains(&self.items[pos].video_id) {
+                self.drop_item(pos);
+                n += 1;
+            } else {
+                seen.insert(self.items[pos].video_id.clone());
+                pos += 1;
+            }
+        }
+        if n > 0 {
+            self.refresh();
+        }
         n
     }
 
@@ -480,6 +554,74 @@ mod tests {
         pl.reset();
         assert!(pl.plan().is_empty());
         assert_eq!(ids(&pl), (0..5).map(|k| format!("i{k}")).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn find_duplicates_extracts_groups() {
+        let mut pl = make(2);
+        let v = |id: &str| VideoInfo {
+            video_id: id.into(),
+            title: format!("Title_{id}"),
+            thumbnail_url: format!("thumb_{id}"),
+            channel: format!("Chan_{id}"),
+            channel_url: String::new(),
+        };
+        pl.add_video(v("v0"), "new-dupe0".into(), None); // v0 duplicates at pos 2
+        pl.add_video(v("v3"), "new-3".into(), None);
+        pl.add_video(v("v0"), "new-dupe0-again".into(), None); // v0 duplicates at pos 4
+
+        let dupes = pl.find_duplicates();
+        assert_eq!(dupes.len(), 1);
+        let g = &dupes[0];
+        assert_eq!(g.video_id, "v0");
+        assert_eq!(g.items.len(), 3);
+        assert!(!g.items[0].is_duplicate);
+        assert!(g.items[1].is_duplicate);
+        assert!(g.items[2].is_duplicate);
+        assert_eq!(g.items[0].playlist_item_id, "i0");
+        assert_eq!(g.items[1].playlist_item_id, "new-dupe0");
+        assert_eq!(g.items[2].playlist_item_id, "new-dupe0-again");
+    }
+
+    #[test]
+    fn dedup_removes_duplicate_videos() {
+        let mut pl = make(3);
+        let v = |id: &str| VideoInfo {
+            video_id: id.into(),
+            title: id.into(),
+            thumbnail_url: String::new(),
+            channel: String::new(),
+            channel_url: String::new(),
+        };
+        pl.add_video(v("v1"), "new-dupe1".into(), None);
+        pl.add_video(v("v3"), "new-3".into(), None);
+        pl.add_video(v("v0"), "new-dupe0".into(), None);
+        assert_eq!(pl.items.len(), 6);
+
+        let removed = pl.dedup();
+        assert_eq!(removed, 2);
+        assert_eq!(pl.items.len(), 4);
+        let vids: Vec<_> = pl.items.iter().map(|i| i.video_id.as_str()).collect();
+        assert_eq!(vids, vec!["v0", "v1", "v2", "v3"]);
+    }
+
+    #[test]
+    fn dedup_server_items_marks_for_deletion() {
+        // サーバー上にもともと重複アイテムがある場合（YouTube上で重複登録されていた場合）
+        let it0 = item(0);
+        let it1 = item(1);
+        let mut it0_dupe = item(2);
+        it0_dupe.video_id = it0.video_id.clone(); // 同じ video_id
+
+        let mut pl = Playlist::new("PL".into(), "T".into(), vec![it0, it1, it0_dupe]);
+        assert_eq!(pl.items.len(), 3);
+        assert_eq!(pl.plan().len(), 0);
+
+        let removed = pl.dedup();
+        assert_eq!(removed, 1);
+        assert_eq!(pl.items.len(), 2);
+        // 2件目の重複アイテム（i2）はサーバー上にあったため、削除計画に入る
+        assert_eq!(pl.plan(), vec![Op::Delete { item_id: "i2".into() }]);
     }
 
     #[test]

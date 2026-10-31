@@ -180,6 +180,16 @@ document.addEventListener("keydown", (e) => {
 
 document.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
   const a = b.dataset.act;
+  if (a === "dedup") {
+    const res = await call("dedup_playlist", { playlistId });
+    if (res) {
+      if (res.playlist) setState(res.playlist);
+      alert(res.removed_count > 0
+        ? `${res.removed_count} 件の重複動画を削除しました。`
+        : "重複している動画はありませんでした。");
+    }
+    return;
+  }
   const s = a === "asc" ? await call("sort_title", { descending: false })
           : a === "desc" ? await call("sort_title", { descending: true })
           : a === "shuffle" ? await call("shuffle")

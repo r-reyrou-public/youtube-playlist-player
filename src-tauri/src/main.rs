@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use model::{Op, Playlist, VideoInfo};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::Mutex;
 use youtube::{PlaylistSummary, YouTube};
@@ -629,6 +629,88 @@ async fn reset(app: App<'_>, handle: AppHandle, playlist_id: String) -> Result<P
     edit(&app, &handle, &playlist_id, |p| Ok(p.reset())).await
 }
 
+#[derive(Serialize)]
+struct DedupOutcome {
+    playlist: Option<Playlist>,
+    removed_count: usize,
+}
+
+/// プレイリスト内の重複動画（同じ video_id）を削除する。playlist_id が None の場合はすべてのプレイリストを対象にする。
+#[tauri::command]
+async fn dedup_playlist(app: App<'_>, handle: AppHandle, playlist_id: Option<String>) -> Result<DedupOutcome, String> {
+    let mut total_removed = 0;
+    let mut target_playlist = None;
+
+    if let Some(pid) = playlist_id {
+        let pl = edit(&app, &handle, &pid, |p| {
+            total_removed = p.dedup();
+            Ok(())
+        }).await?;
+        target_playlist = Some(pl);
+    } else {
+        let pids: Vec<String> = {
+            let g = app.lock().await;
+            g.playlists.keys().cloned().collect()
+        };
+        for pid in pids {
+            let _ = edit(&app, &handle, &pid, |p| {
+                total_removed += p.dedup();
+                Ok(())
+            }).await;
+        }
+    }
+    Ok(DedupOutcome { playlist: target_playlist, removed_count: total_removed })
+}
+
+#[derive(Deserialize)]
+struct DeleteTarget {
+    playlist_id: String,
+    playlist_item_ids: Vec<String>,
+}
+
+/// 重複動画を検出してグループ化して返す。playlist_id が None の場合は全プレイリストを対象にする。
+#[tauri::command]
+async fn find_duplicates(app: App<'_>, playlist_id: Option<String>) -> Result<Vec<model::DuplicateGroup>, String> {
+    let g = app.lock().await;
+    let mut groups = Vec::new();
+    if let Some(pid) = playlist_id {
+        if let Some(p) = g.playlists.get(&pid) {
+            groups.extend(p.find_duplicates());
+        }
+    } else {
+        for s in &g.summaries {
+            if let Some(p) = g.playlists.get(&s.id) {
+                groups.extend(p.find_duplicates());
+            }
+        }
+    }
+    Ok(groups)
+}
+
+/// 選択された重複動画を削除する。削除した合計件数を返す。
+#[tauri::command]
+async fn remove_selected_duplicates(
+    app: App<'_>,
+    handle: AppHandle,
+    targets: Vec<DeleteTarget>,
+) -> Result<usize, String> {
+    let mut total_removed = 0;
+    for t in targets {
+        if t.playlist_item_ids.is_empty() {
+            continue;
+        }
+        let _ = edit(&app, &handle, &t.playlist_id, |p| {
+            for id in &t.playlist_item_ids {
+                if p.take_item(id).is_some() {
+                    total_removed += 1;
+                }
+            }
+            Ok(())
+        }).await;
+    }
+    Ok(total_removed)
+}
+
 #[tauri::command]
 async fn pending_count(app: App<'_>, playlist_id: String) -> Result<usize, String> {
     Ok(app.lock().await.playlists.get(&playlist_id).map_or(0, |p| p.plan().len()))
@@ -1130,6 +1212,9 @@ fn main() {
             move_item,
             remove_items,
             reset,
+            dedup_playlist,
+            find_duplicates,
+            remove_selected_duplicates,
             pending_count,
             pending_summary,
             push_plan,

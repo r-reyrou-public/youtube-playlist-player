@@ -13,6 +13,7 @@
   <button id="ctxFind">検索・並べ替え…</button>
   <button id="ctxRefresh">YouTubeから最新を取得</button>
   <button id="ctxImport">他のリストの動画を取り込む…</button>
+  <button id="ctxDedup">重複した動画を削除</button>
   <button id="ctxRemove">削除（一覧から外す）</button>
 </div>
 <dialog id="settingsDlg">
@@ -68,6 +69,25 @@
   </table>
   <div class="dlgBtns"><button id="helpClose">閉じる</button></div>
 </dialog>
+<dialog id="dedupDlg">
+  <h3>重複チェック</h3>
+  <div class="dedupBar">
+    <label>対象リスト: <select id="dedupTarget"></select></label>
+    <button id="dedupScanBtn">再チェック</button>
+    <span class="sepv"></span>
+    <button id="dedupSelDupes" title="2件目以降の重複分にチェックを入れます">重複分のみ選択</button>
+    <button id="dedupSelAll" title="すべてのアイテムを選択します">全選択</button>
+    <button id="dedupSelClear" title="すべての選択を解除します">全解除</button>
+    <span class="grow"></span>
+    <span id="dedupSummaryText" class="pkVideo"></span>
+  </div>
+  <div id="dedupList" class="dedupContainer"></div>
+  <p class="note">※ 選択した動画はプレイリストから外されます。YouTube への反映はメイン画面の「Push」で行われます。</p>
+  <div class="dlgBtns">
+    <button id="dedupDeleteBtn" class="danger" disabled>選択した動画を削除 (0件)</button>
+    <button id="dedupCloseBtn">閉じる</button>
+  </div>
+</dialog>
 <main>
   <aside id="treePane">
     <div id="treeHead">
@@ -93,6 +113,7 @@
         <div id="menuWrap">
           <button id="menuBtn" aria-label="メニュー" title="メニュー">☰</button>
           <div id="menu" hidden>
+            <button id="openDedup">重複チェック…</button>
             <button id="openSettings">設定</button>
             <button id="openHelp">ヘルプ</button>
           </div>
