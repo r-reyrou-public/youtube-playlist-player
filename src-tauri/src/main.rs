@@ -328,6 +328,8 @@ async fn import_playlists(
                 thumbnail_url: i.thumbnail_url.clone(),
                 channel: i.channel.clone(),
                 channel_url: String::new(),
+                duration_secs: i.duration_secs,
+                duration: i.duration.clone(),
             }));
         }
         let (mut added, mut skipped) = (0usize, 0usize);
@@ -430,6 +432,8 @@ async fn copy_peeked(
                     thumbnail_url: i.thumbnail_url.clone(),
                     channel: i.channel.clone(),
                     channel_url: String::new(),
+                    duration_secs: i.duration_secs,
+                    duration: i.duration.clone(),
                 },
                 new_id,
                 None,
@@ -514,7 +518,15 @@ async fn move_between(
             let new_id = g.next_item_id();
             let target = g.playlists.get_mut(&to_playlist).ok_or("プレイリストが読み込まれていません")?;
             target.add_video(
-                VideoInfo { video_id: item.video_id, title: item.title, thumbnail_url: item.thumbnail_url, channel: item.channel, channel_url: String::new() },
+                VideoInfo {
+                    video_id: item.video_id,
+                    title: item.title,
+                    thumbnail_url: item.thumbnail_url,
+                    channel: item.channel,
+                    channel_url: String::new(),
+                    duration_secs: item.duration_secs,
+                    duration: item.duration,
+                },
                 new_id,
                 Some(to_index + k),
             );
@@ -528,26 +540,109 @@ async fn move_between(
 }
 
 /// 動画一覧を返す。未取得なら playlistItems.list で取得（1ユニット/50件）、取得済みならキャッシュ。
+/// 動画一覧を返す。未取得なら playlistItems.list で取得（1ユニット/50件）、取得済みならキャッシュ。
+/// リストを開いた際に再生時間を取得し、ショート動画（60秒以下）は削除する。
 #[tauri::command]
 async fn get_playlist(app: App<'_>, conn: State<'_, ConnectLock>, handle: AppHandle, playlist_id: String) -> Result<Playlist, String> {
-    let title = {
+    let (cached, title) = {
         let g = app.lock().await;
-        if let Some(p) = g.playlists.get(&playlist_id) {
-            return Ok(p.clone());
-        }
-        g.summaries
+        let title = g.summaries
             .iter()
             .find(|s| s.id == playlist_id)
             .map(|s| s.title.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        (g.playlists.get(&playlist_id).cloned(), title)
     };
+
+    if let Some(mut pl) = cached {
+        let missing_ids: Vec<String> = pl.items.iter()
+            .filter(|it| it.duration_secs == 0 && !it.video_id.is_empty())
+            .map(|it| it.video_id.clone())
+            .collect();
+
+        let mut changed = false;
+        if !missing_ids.is_empty() {
+            if let Ok(c) = client(&app, &conn).await {
+                if let Ok(durations) = c.fetch_video_durations(&missing_ids).await {
+                    if pl.update_durations(&durations) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        let removed_shorts = pl.remove_shorts();
+        if removed_shorts > 0 {
+            changed = true;
+        }
+
+        if changed {
+            let mut g = app.lock().await;
+            g.playlists.insert(playlist_id.clone(), pl.clone());
+            if let Some(s) = g.summaries.iter_mut().find(|s| s.id == playlist_id) {
+                s.item_count = pl.items.len();
+            }
+            drop(g);
+            schedule_save(&handle);
+            notify(&handle, &playlist_id);
+        }
+        return Ok(pl);
+    }
+
     let c = client(&app, &conn).await?;
     let pl = c.fetch_playlist(&playlist_id, &title).await?; // 通信中は共有状態をロックしない
     let mut g = app.lock().await;
-    let out = g.playlists.entry(playlist_id).or_insert(pl).clone();
+    if let Some(s) = g.summaries.iter_mut().find(|s| s.id == playlist_id) {
+        s.item_count = pl.items.len();
+    }
+    let out = g.playlists.entry(playlist_id.clone()).or_insert(pl).clone();
     drop(g);
     schedule_save(&handle);
+    notify(&handle, &playlist_id);
     Ok(out)
+}
+
+/// ショート動画（60秒以下）を一括削除する。
+#[tauri::command]
+async fn remove_shorts(
+    app: App<'_>,
+    handle: AppHandle,
+    playlist_id: Option<String>,
+) -> Result<usize, String> {
+    let mut g = app.lock().await;
+    let mut total_removed = 0;
+    let mut affected_ids = Vec::new();
+
+    let target_ids: Vec<String> = match playlist_id {
+        Some(id) => vec![id],
+        None => g.playlists.keys().cloned().collect(),
+    };
+
+    for pid in target_ids {
+        let mut updated_len = None;
+        if let Some(p) = g.playlists.get_mut(&pid) {
+            let removed = p.remove_shorts();
+            if removed > 0 {
+                total_removed += removed;
+                affected_ids.push(pid.clone());
+                updated_len = Some(p.items.len());
+            }
+        }
+        if let Some(len) = updated_len {
+            if let Some(s) = g.summaries.iter_mut().find(|s| s.id == pid) {
+                s.item_count = len;
+            }
+        }
+    }
+
+    drop(g);
+    if total_removed > 0 {
+        schedule_save(&handle);
+        for pid in affected_ids {
+            notify(&handle, &pid);
+        }
+    }
+    Ok(total_removed)
 }
 
 /// YouTube から最新を取得し直す（手元の未反映の変更は破棄される）。手元だけの新規リストは対象外。
@@ -1215,6 +1310,7 @@ fn main() {
             dedup_playlist,
             find_duplicates,
             remove_selected_duplicates,
+            remove_shorts,
             pending_count,
             pending_summary,
             push_plan,

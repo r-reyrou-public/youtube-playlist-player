@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct PlaylistItem {
     /// 既存の動画は YouTube の playlistItem ID、新しく追加した動画は "new-N"。
     pub playlist_item_id: String,
@@ -26,6 +26,12 @@ pub struct PlaylistItem {
     pub channel_id: String,
     /// YouTube 側にまだ無い（Push で追加される）。
     pub is_new: bool,
+    /// 再生時間（秒数）。未取得なら 0。
+    #[serde(default)]
+    pub duration_secs: u32,
+    /// フォーマット済み再生時間（例: "3:45"）。未取得なら空。
+    #[serde(default)]
+    pub duration: String,
 }
 
 /// リストへ追加する動画の情報。
@@ -47,7 +53,7 @@ pub struct DuplicateGroup {
     pub items: Vec<DuplicateItemInfo>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct VideoInfo {
     pub video_id: String,
     pub title: String,
@@ -56,7 +62,84 @@ pub struct VideoInfo {
     pub channel: String,
     #[serde(default)]
     pub channel_url: String,
+    #[serde(default)]
+    pub duration_secs: u32,
+    #[serde(default)]
+    pub duration: String,
 }
+
+/// ISO 8601 duration（例: "PT1H2M34S", "PT45S", "PT1M"）を秒数に変換する。
+pub fn parse_iso8601_duration(s: &str) -> u32 {
+    let s = s.trim();
+    if !s.starts_with('P') {
+        return 0;
+    }
+    let mut total_secs: u64 = 0;
+    let mut num_buf = String::new();
+    let mut in_time = false;
+
+    for ch in s.chars().skip(1) {
+        match ch {
+            'T' => {
+                in_time = true;
+            }
+            '0'..='9' => {
+                num_buf.push(ch);
+            }
+            'D' => {
+                if let Ok(n) = num_buf.parse::<u64>() {
+                    total_secs += n * 86400;
+                }
+                num_buf.clear();
+            }
+            'H' if in_time => {
+                if let Ok(n) = num_buf.parse::<u64>() {
+                    total_secs += n * 3600;
+                }
+                num_buf.clear();
+            }
+            'M' if in_time => {
+                if let Ok(n) = num_buf.parse::<u64>() {
+                    total_secs += n * 60;
+                }
+                num_buf.clear();
+            }
+            'M' if !in_time => {
+                // 期間の月 (approx 30 days)
+                if let Ok(n) = num_buf.parse::<u64>() {
+                    total_secs += n * 30 * 86400;
+                }
+                num_buf.clear();
+            }
+            'S' if in_time => {
+                if let Ok(n) = num_buf.parse::<u64>() {
+                    total_secs += n;
+                }
+                num_buf.clear();
+            }
+            _ => {
+                num_buf.clear();
+            }
+        }
+    }
+    total_secs.min(u32::MAX as u64) as u32
+}
+
+/// 秒数を "M:SS" または "H:MM:SS" 形式にフォーマットする（例: 65 -> "1:05", 3661 -> "1:01:01"）。
+pub fn format_duration(secs: u32) -> String {
+    if secs == 0 {
+        return String::new();
+    }
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{}:{:02}:{:02}", h, m, s)
+    } else {
+        format!("{}:{:02}", m, s)
+    }
+}
+
 
 /// Push で YouTube へ行う1回分の操作（いずれも 50 ユニット）。
 #[derive(Clone, Debug, PartialEq)]
@@ -209,6 +292,8 @@ impl Playlist {
                 channel: video.channel,
                 channel_id: String::new(),
                 is_new: true,
+                duration_secs: video.duration_secs,
+                duration: video.duration,
             },
         };
         let at = index.unwrap_or(self.items.len()).min(self.items.len());
@@ -272,6 +357,44 @@ impl Playlist {
     }
 
     /// リスト内の重複動画（同じ video_id を持つ2回目以降のアイテム）を削除する。削除した件数を返す。
+    /// ショート動画（再生時間 60秒以下、またはタイトルに #shorts を含む）を削除する。
+    /// 削除した件数を返す。
+    pub fn remove_shorts(&mut self) -> usize {
+        let mut n = 0;
+        let mut pos = 0;
+        while pos < self.items.len() {
+            let item = &self.items[pos];
+            let is_short = (item.duration_secs > 0 && item.duration_secs <= 60)
+                || item.title.to_lowercase().contains("#shorts")
+                || item.title.to_lowercase().contains("#short");
+            if is_short {
+                self.drop_item(pos);
+                n += 1;
+            } else {
+                pos += 1;
+            }
+        }
+        if n > 0 {
+            self.refresh();
+        }
+        n
+    }
+
+    /// 動画IDと再生時間のマップを受け取り、アイテムの duration を更新する。
+    pub fn update_durations(&mut self, map: &std::collections::HashMap<String, u32>) -> bool {
+        let mut changed = false;
+        for it in &mut self.items {
+            if let Some(&secs) = map.get(&it.video_id) {
+                if it.duration_secs != secs {
+                    it.duration_secs = secs;
+                    it.duration = format_duration(secs);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     pub fn dedup(&mut self) -> usize {
         let mut seen = std::collections::HashSet::new();
         let mut n = 0;
@@ -392,6 +515,7 @@ mod tests {
             channel: format!("C{}", 5 - k % 3),
             channel_id: String::new(),
             is_new: false,
+            ..Default::default()
         }
     }
 
@@ -400,7 +524,7 @@ mod tests {
     }
 
     fn video(k: usize) -> VideoInfo {
-        VideoInfo { video_id: format!("x{k}"), title: format!("X{k}"), thumbnail_url: String::new(), channel: String::new(), channel_url: String::new() }
+        VideoInfo { video_id: format!("x{k}"), title: format!("X{k}"), ..Default::default() }
     }
 
     /// 実行時と同じく「先頭の操作を1件ずつ反映」を繰り返す。操作数を返す。
@@ -479,7 +603,7 @@ mod tests {
     fn re_adding_removed_video_restores_it() {
         let mut pl = make(3);
         pl.remove_video("v1");
-        pl.add_video(VideoInfo { video_id: "v1".into(), title: "T1".into(), thumbnail_url: String::new(), channel: String::new(), channel_url: String::new() }, "new-1".into(), Some(1));
+        pl.add_video(VideoInfo { video_id: "v1".into(), title: "T1".into(), ..Default::default() }, "new-1".into(), Some(1));
         assert!(pl.plan().is_empty(), "削除→再追加は何も送らない");
     }
 
@@ -536,7 +660,7 @@ mod tests {
         let mut b = make(2);
         let it = a.take_item("i1").unwrap();
         b.add_video(
-            VideoInfo { video_id: it.video_id, title: it.title, thumbnail_url: it.thumbnail_url, channel: it.channel, channel_url: String::new() },
+            VideoInfo { video_id: it.video_id, title: it.title, thumbnail_url: it.thumbnail_url, channel: it.channel, ..Default::default() },
             "new-9".into(),
             Some(1),
         );
@@ -564,7 +688,7 @@ mod tests {
             title: format!("Title_{id}"),
             thumbnail_url: format!("thumb_{id}"),
             channel: format!("Chan_{id}"),
-            channel_url: String::new(),
+            ..Default::default()
         };
         pl.add_video(v("v0"), "new-dupe0".into(), None); // v0 duplicates at pos 2
         pl.add_video(v("v3"), "new-3".into(), None);
@@ -589,9 +713,7 @@ mod tests {
         let v = |id: &str| VideoInfo {
             video_id: id.into(),
             title: id.into(),
-            thumbnail_url: String::new(),
-            channel: String::new(),
-            channel_url: String::new(),
+            ..Default::default()
         };
         pl.add_video(v("v1"), "new-dupe1".into(), None);
         pl.add_video(v("v3"), "new-3".into(), None);
@@ -631,5 +753,58 @@ mod tests {
         assert_eq!(pl.items[0].title, "T9");
         pl.reset();
         assert_eq!(pl.items[0].video_id, "v0");
+    }
+
+    #[test]
+    fn parse_iso8601_duration_examples() {
+        assert_eq!(parse_iso8601_duration("PT15S"), 15);
+        assert_eq!(parse_iso8601_duration("PT1M"), 60);
+        assert_eq!(parse_iso8601_duration("PT1M23S"), 83);
+        assert_eq!(parse_iso8601_duration("PT1H2M3S"), 3723);
+        assert_eq!(parse_iso8601_duration("PT0S"), 0);
+        assert_eq!(parse_iso8601_duration("P0D"), 0);
+        assert_eq!(parse_iso8601_duration(""), 0);
+        assert_eq!(parse_iso8601_duration("invalid"), 0);
+    }
+
+    #[test]
+    fn format_duration_examples() {
+        assert_eq!(format_duration(0), "");
+        assert_eq!(format_duration(15), "0:15");
+        assert_eq!(format_duration(60), "1:00");
+        assert_eq!(format_duration(83), "1:23");
+        assert_eq!(format_duration(3723), "1:02:03");
+    }
+
+    #[test]
+    fn remove_shorts_removes_short_videos_and_shorts_tag() {
+        let mut it0 = item(0);
+        it0.duration_secs = 45; // 45秒 -> ショート
+        it0.duration = "0:45".into();
+
+        let mut it1 = item(1);
+        it1.duration_secs = 60; // 60秒 -> ショート
+        it1.duration = "1:00".into();
+
+        let mut it2 = item(2);
+        it2.duration_secs = 61; // 61秒 -> 通常動画
+        it2.duration = "1:01".into();
+
+        let mut it3 = item(3);
+        it3.duration_secs = 180; // 3分だがタイトルに #Shorts -> ショート
+        it3.title = "Awesome dance #Shorts".into();
+
+        let mut it4 = item(4);
+        it4.duration_secs = 0; // ライブ配信など -> 保持
+        it4.title = "Live Stream".into();
+
+        let mut pl = Playlist::new("PL".into(), "T".into(), vec![it0, it1, it2, it3, it4]);
+        assert_eq!(pl.items.len(), 5);
+
+        let removed = pl.remove_shorts();
+        assert_eq!(removed, 3); // it0, it1, it3 が削除
+        assert_eq!(pl.items.len(), 2);
+        assert_eq!(pl.items[0].video_id, "v2");
+        assert_eq!(pl.items[1].video_id, "v4");
     }
 }

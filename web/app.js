@@ -183,7 +183,7 @@ function renderChildren(id) {
     const li = document.createElement("li");
     if (id === nowPlaylistId && it.video_id === nowVideoId) li.classList.add("playing");
     if (it.is_new) li.classList.add("isnew");
-    li.innerHTML = `<span class="handle" title="ドラッグして並べ替え">⠿</span><span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>`;
+    li.innerHTML = `<span class="handle" title="ドラッグして並べ替え">⠿</span><span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>${it.duration ? `<span class="duration">${it.duration}</span>` : ""}`;
     li.querySelector("img").src = it.thumbnail_url;
     li.querySelector(".title").textContent = it.title;
     li.title = "ダブルクリックで再生 / 左のハンドルをドラッグで並べ替え";
@@ -319,6 +319,21 @@ $("ctxDedup").onclick = async () => {
       : `「${s.title}」に重複している動画はありませんでした。`);
   }
 };
+$("ctxShorts").onclick = async () => {
+  const s = ctxTarget;
+  hideCtx();
+  if (!s) return;
+  const count = await call("remove_shorts", { playlistId: s.id });
+  if (typeof count === "number") {
+    cache[s.id] = await call("get_playlist", { playlistId: s.id });
+    summaries = await call("list_summaries");
+    renderTree();
+    refreshPush();
+    alert(count > 0
+      ? `「${s.title}」から ${count} 本のショート動画（60秒以下）を削除しました。`
+      : `「${s.title}」にショート動画はありませんでした。`);
+  }
+};
 $("ctxRemove").onclick = async () => {
   const s = ctxTarget;
   hideCtx();
@@ -339,9 +354,16 @@ async function toggle(id) {
   if (expanded.has(id)) { expanded.delete(id); renderTree(); return; }
   expanded.add(id);
   renderTree();
-  if (!cache[id]) {
+  // リストを開いた際に再生時間を取得し、ショート動画を削除
+  const needFetch = !cache[id] || cache[id].items.some(it => !it.duration_secs && !it.duration);
+  if (needFetch) {
     const pl = await call("get_playlist", { playlistId: id });
-    if (pl) cache[id] = pl; else expanded.delete(id);
+    if (pl) {
+      cache[id] = pl;
+      summaries = await call("list_summaries");
+    } else {
+      expanded.delete(id);
+    }
     renderTree();
   }
 }
@@ -934,6 +956,24 @@ async function openDedupModal() {
 }
 
 $("openDedup").onclick = () => { menu.hidden = true; openDedupModal(); };
+$("openShorts").onclick = async () => {
+  menu.hidden = true;
+  if (!confirm("開いているプレイリストからショート動画（60秒以下）を一括削除しますか？\n※YouTube への反映は Push で行います。")) return;
+  const count = await call("remove_shorts", {});
+  if (typeof count === "number") {
+    summaries = await call("list_summaries");
+    for (const s of summaries) {
+      if (expanded.has(s.id)) {
+        cache[s.id] = await call("get_playlist", { playlistId: s.id });
+      }
+    }
+    renderTree();
+    refreshPush();
+    alert(count > 0
+      ? `計 ${count} 本のショート動画（60秒以下）を削除しました。`
+      : "ショート動画はありませんでした。");
+  }
+};
 $("openSettings").onclick = () => { refreshCred(); $("settingsDlg").showModal(); };
 $("settingsClose").onclick = () => $("settingsDlg").close();
 $("helpClose").onclick = () => $("helpDlg").close();

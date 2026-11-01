@@ -113,7 +113,7 @@ function render() {
     li.draggable = false;
     if (it.current_position !== it.original_position) li.classList.add("changed");
     if (it.is_new) li.classList.add("isnew");
-    li.innerHTML = `<span class="handle" title="ドラッグして並べ替え">⠿</span><span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>` +
+    li.innerHTML = `<span class="handle" title="ドラッグして並べ替え">⠿</span><span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>${it.duration ? `<span class="duration">${it.duration}</span>` : ""}` +
       `<span class="mv"><button class="up" title="1つ上へ">▲</button><button class="down" title="1つ下へ">▼</button></span>`;
     const handle = li.querySelector(".handle");
     handle.addEventListener("mousedown", () => {
@@ -187,6 +187,17 @@ document.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
       alert(res.removed_count > 0
         ? `${res.removed_count} 件の重複動画を削除しました。`
         : "重複している動画はありませんでした。");
+    }
+    return;
+  }
+  if (a === "shorts") {
+    const count = await call("remove_shorts", { playlistId });
+    if (typeof count === "number") {
+      const pl = await call("get_playlist", { playlistId });
+      if (pl) setState(pl);
+      alert(count > 0
+        ? `${count} 本のショート動画（60秒以下）を削除しました。`
+        : "ショート動画はありませんでした。");
     }
     return;
   }

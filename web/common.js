@@ -389,7 +389,7 @@ const Common = (() => {
       for (const { it, idx } of rows) {
         const row = el("div", "pkRow");
         row.title = "クリックで選択";
-        row.append(el("span", "no", String(idx + 1)), el("span", "t", it.title), el("span", "c", it.channel || "（チャンネル不明）"));
+        row.append(el("span", "no", String(idx + 1)), el("span", "t", it.title), ...(it.duration ? [el("span", "duration", it.duration)] : []), el("span", "c", it.channel || "（チャンネル不明）"));
         row.onclick = () => { close(); onPick(it, idx); };
         list.appendChild(row);
       }

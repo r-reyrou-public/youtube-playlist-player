@@ -591,6 +591,7 @@ impl YouTube {
                     channel: sn["videoOwnerChannelTitle"].as_str().unwrap_or_default().into(),
                     channel_id: ch_id.to_string(),
                     is_new: false,
+                    ..Default::default()
                 });
             }
             page_token = body["nextPageToken"].as_str().map(str::to_string);
@@ -598,7 +599,55 @@ impl YouTube {
                 break;
             }
         }
-        Ok(Playlist::new(playlist_id.to_string(), title.to_string(), items))
+        let mut pl = Playlist::new(playlist_id.to_string(), title.to_string(), items);
+        // 動画の再生時間を一括取得
+        let video_ids: Vec<String> = pl.items.iter().map(|it| it.video_id.clone()).collect();
+        if let Ok(durations) = self.fetch_video_durations(&video_ids).await {
+            pl.update_durations(&durations);
+        }
+        // ショート動画を削除
+        pl.remove_shorts();
+        Ok(pl)
+    }
+
+    /// videos.list で複数動画の再生時間をまとめて取得する（最大50件/リクエスト、1ユニット/50件）。
+    /// video_id -> duration_secs (秒数) のマップを返す。
+    pub async fn fetch_video_durations(
+        &self,
+        video_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, u32>, String> {
+        let mut out = std::collections::HashMap::new();
+        let unique_ids: Vec<String> = {
+            let mut set = std::collections::HashSet::new();
+            let mut list = Vec::new();
+            for id in video_ids {
+                if !id.is_empty() && set.insert(id.clone()) {
+                    list.push(id.clone());
+                }
+            }
+            list
+        };
+        for chunk in unique_ids.chunks(50) {
+            let id_param = chunk.join(",");
+            let query = [
+                ("part", "contentDetails"),
+                ("id", &id_param),
+                ("maxResults", "50"),
+            ];
+            let body = self.get_json(VIDEOS, &query).await?;
+            if let Some(items) = body["items"].as_array() {
+                for it in items {
+                    if let (Some(vid), Some(dur_str)) = (
+                        it["id"].as_str(),
+                        it["contentDetails"]["duration"].as_str(),
+                    ) {
+                        let secs = crate::model::parse_iso8601_duration(dur_str);
+                        out.insert(vid.to_string(), secs);
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     async fn send_json(&self, req: reqwest::RequestBuilder, body: &Value) -> Result<Value, String> {
@@ -712,6 +761,7 @@ pub async fn fetch_oembed(video_id: &str) -> Result<VideoInfo, String> {
         thumbnail_url: v["thumbnail_url"].as_str().unwrap_or_default().to_string(),
         channel: v["author_name"].as_str().unwrap_or_default().to_string(),
         channel_url: v["author_url"].as_str().unwrap_or_default().to_string(),
+        ..Default::default()
     })
 }
 
