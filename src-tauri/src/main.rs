@@ -440,12 +440,16 @@ async fn copy_peeked(
             );
             added += 1;
         }
+        let total_items = pl.items.len();
         g.playlists.insert(id.clone(), pl);
         if is_new {
             g.summaries.push(PlaylistSummary { id: id.clone(), title: title.clone(), item_count: added, is_new: true });
+        } else if let Some(s) = g.summaries.iter_mut().find(|s| s.id == id) {
+            s.item_count = total_items;
         }
         (id, title, added, skipped)
     };
+    schedule_save(&handle);
     notify(&handle, &id);
     Ok(CopyResult { id, title, added, skipped })
 }

@@ -246,13 +246,22 @@ const Common = (() => {
     dlg.appendChild(list);
 
     const dest = el("div", "pubDest");
+
+    const rowNew = el("div", "pubDestRow");
+    const l1 = el("label");
     const rNew = el("input"); rNew.type = "radio"; rNew.name = "pubDest"; rNew.checked = true;
+    l1.append(rNew, el("span", "", "新規リストを作る:"));
     const nameIn = el("input"); nameIn.type = "text"; nameIn.maxLength = 150; nameIn.placeholder = "新規リスト名";
+    rowNew.append(l1, nameIn);
+
+    const rowOld = el("div", "pubDestRow");
+    const l2 = el("label");
     const rOld = el("input"); rOld.type = "radio"; rOld.name = "pubDest";
+    l2.append(rOld, el("span", "", "既存のリストに追加:"));
     const sel = el("select");
-    const l1 = el("label"); l1.append(rNew, " 新規リストを作る ", nameIn);
-    const l2 = el("label"); l2.append(rOld, " 既存のリストに追加 ", sel);
-    dest.append(l1, l2);
+    rowOld.append(l2, sel);
+
+    dest.append(rowNew, rowOld);
     dlg.appendChild(dest);
     dlg.appendChild(el("p", "note", "選んだ動画を自分のリストへコピーします（元のリストは変わりません）。YouTube への反映は Push で行います（動画1本 50 ユニット、新規リストはさらに 50 ユニット）。"));
 
@@ -271,6 +280,31 @@ const Common = (() => {
     dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(null); });
     dlg.showModal();
 
+    // 既存リストの読み込み（モーダル表示時に即時取得してプルダウンを準備）
+    (async () => {
+      try {
+        const summaries = await invoke("list_summaries");
+        sel.textContent = "";
+        if (!summaries || summaries.length === 0) {
+          const o = el("option", "", "（利用可能な既存リストがありません）");
+          o.value = "";
+          sel.appendChild(o);
+          rOld.disabled = true;
+          sel.disabled = true;
+        } else {
+          for (const s of summaries) {
+            const o = el("option", "", `${s.title}（${s.item_count}本）`);
+            o.value = s.id;
+            sel.appendChild(o);
+          }
+          rOld.disabled = false;
+          sel.disabled = false;
+        }
+      } catch (err) {
+        console.error("Failed to load summaries for select", err);
+      }
+    })();
+
     const boxes = [];   // { cb, id }
     const refresh = () => {
       const n = boxes.filter((b) => b.cb.checked).length;
@@ -279,18 +313,25 @@ const Common = (() => {
     };
     allBtn.onclick = () => { boxes.forEach((b) => (b.cb.checked = true)); refresh(); };
     noneBtn.onclick = () => { boxes.forEach((b) => (b.cb.checked = false)); refresh(); };
-    nameIn.addEventListener("focus", () => (rNew.checked = true));
-    sel.addEventListener("focus", () => (rOld.checked = true));
+
+    nameIn.addEventListener("focus", () => { rNew.checked = true; });
+    nameIn.addEventListener("input", () => { rNew.checked = true; });
+
+    l2.onclick = () => { rOld.checked = true; sel.focus(); };
+    sel.addEventListener("mousedown", () => { rOld.checked = true; });
+    sel.addEventListener("change", () => { rOld.checked = true; });
+    sel.addEventListener("focus", () => { rOld.checked = true; });
 
     apply.onclick = async () => {
       const video_ids = boxes.filter((b) => b.cb.checked).map((b) => b.id);
       if (!video_ids.length) return;
       if (rOld.checked && !sel.value) { alert("追加先のリストを選んでください"); return; }
+      if (rNew.checked && !nameIn.value.trim()) { alert("新規リスト名を入力してください"); nameIn.focus(); return; }
       apply.disabled = true;
       cancel.disabled = true;
       try {
         if (rOld.checked) await invoke("get_playlist", { playlistId: sel.value });   // 未取得なら取得
-        close(await invoke("copy_peeked", { videoIds: video_ids, target: rOld.checked ? sel.value : null, title: nameIn.value }));
+        close(await invoke("copy_peeked", { videoIds: video_ids, target: rOld.checked ? sel.value : null, title: nameIn.value.trim() }));
       } catch (e) {
         alert(e);
         apply.disabled = false;
@@ -321,12 +362,6 @@ const Common = (() => {
         row.append(cb, el("span", "t", it.title), chSpan);
         list.appendChild(row);
       });
-      for (const s of await invoke("list_summaries")) {
-        const o = el("option", "", `${s.title}（${s.item_count}本）`);
-        o.value = s.id;
-        sel.appendChild(o);
-      }
-      if (!sel.options.length) { rOld.disabled = true; sel.disabled = true; }
       refresh();
     } catch (e) {
       list.textContent = "";
