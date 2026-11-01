@@ -5,6 +5,7 @@ const $ = (id) => document.getElementById(id);
 let summaries = [];          // [{id, title, item_count}]
 const cache = {};            // playlist_id -> Playlist（展開済みのみ）
 const expanded = new Set();
+const durationsFetched = new Set();
 let player = null, playerReady = false;
 let playOnce = false;   // 「この1本だけ再生」: 終わっても次へ進まない
 let nowSingle = null;   // URL から再生中の単発の動画 { video_id, title, thumbnail_url }（リストには未登録）
@@ -45,19 +46,35 @@ async function call(cmd, args) {
 // プレイリストを先頭から（またはシャッフルして）直接再生する
 async function playPlaylist(id, shuffle = false) {
   if (!playerReady) { status("プレイヤーの準備ができていません"); return; }
+  if (id === nowPlaylistId && !shuffle) {
+    const st = player.getPlayerState();
+    if (st === YT.PlayerState.PLAYING) player.pauseVideo();
+    else player.playVideo();
+    updatePlayIcons();
+    return;
+  }
   let pl = cache[id];
   if (!pl || !pl.items || !pl.items.length) {
     status("プレイリストを読み込み中...");
     pl = await call("get_playlist", { playlistId: id });
     if (pl) {
       cache[id] = pl;
-      summaries = await invoke("list_summaries");
+      durationsFetched.add(id);
+      summaries = await call("list_summaries");
       renderTree();
     }
   }
   if (!pl || !pl.items || !pl.items.length) {
     status("再生できる動画がありません");
     return;
+  }
+  expanded.add(id);
+  if (shuffle) {
+    if (settings.shuffle === "off") {
+      settings.shuffle = "list";
+      saveSettings();
+      updateShuffleUi();
+    }
   }
   let target = pl.items[0];
   if (shuffle) {
@@ -69,7 +86,28 @@ async function playPlaylist(id, shuffle = false) {
 }
 
 // ---- 左ペイン: プレイリストのツリー ----
+
+function updatePlayIcons() {
+  if (!playerReady) return;
+  const isPlaying = player.getPlayerState() === YT.PlayerState.PLAYING;
+  document.querySelectorAll('#tree .plPlayBtn').forEach((btn) => {
+    const li = btn.closest('li');
+    const plPlaying = li && li.classList.contains('playing');
+    btn.textContent = (plPlaying && isPlaying) ? '⏸' : '▶';
+    btn.title = (plPlaying && isPlaying) ? '一時停止' : 'このリストを再生';
+  });
+  document.querySelectorAll('.vlist li').forEach((li) => {
+    const vPlay = li.querySelector('.vPlayBtn');
+    if (!vPlay) return;
+    const vPlaying = li.classList.contains('playing');
+    vPlay.textContent = (vPlaying && isPlaying) ? '⏸' : '▶';
+    vPlay.title = (vPlaying && isPlaying) ? '一時停止' : 'この動画を再生';
+  });
+}
+
 function renderTree() {
+  const treePane = $("treePane");
+  const prevScroll = treePane ? treePane.scrollTop : 0;
   const ul = $("tree");
   ul.innerHTML = "";
   for (const s of summaries) {
@@ -96,6 +134,9 @@ function renderTree() {
     playBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       playPlaylist(s.id);
+    });
+    playBtn.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
     });
 
     head.querySelector(".name").textContent = s.title;
@@ -159,6 +200,8 @@ function renderTree() {
     if (expanded.has(s.id)) li.appendChild(renderChildren(s.id));
     ul.appendChild(li);
   }
+  if (treePane) treePane.scrollTop = prevScroll;
+  updatePlayIcons();
 }
 
 // リストの並び順を変える（before の直前へ。null なら末尾へ）
@@ -242,11 +285,20 @@ function renderChildren(id) {
       e.stopPropagation();
       playVideo(id, it.video_id);
     });
+    img.addEventListener("dblclick", (e) => e.stopPropagation());
     const vPlay = li.querySelector(".vPlayBtn");
     vPlay.addEventListener("click", (e) => {
       e.stopPropagation();
-      playVideo(id, it.video_id);
+      if (id === nowPlaylistId && it.video_id === nowVideoId && playerReady) {
+        const st = player.getPlayerState();
+        if (st === YT.PlayerState.PLAYING) player.pauseVideo();
+        else player.playVideo();
+        updatePlayIcons();
+      } else {
+        playVideo(id, it.video_id);
+      }
     });
+    vPlay.addEventListener("dblclick", (e) => e.stopPropagation());
     li.querySelector(".title").textContent = it.title;
     li.title = "クリックで選択 / ダブルクリックまたは▶で再生 / 左のハンドルをドラッグで並べ替え";
     li.draggable = false;
@@ -427,8 +479,9 @@ async function toggle(id) {
   expanded.add(id);
   renderTree();
   // リストを開いた際に再生時間を取得し、ショート動画を削除
-  const needFetch = !cache[id] || cache[id].items.some(it => !it.duration_secs && !it.duration);
+  const needFetch = !cache[id] || (!durationsFetched.has(id) && cache[id].items.some(it => !it.duration_secs && !it.duration));
   if (needFetch) {
+    durationsFetched.add(id);
     const pl = await call("get_playlist", { playlistId: id });
     if (pl) {
       cache[id] = pl;
@@ -598,6 +651,7 @@ window.onYouTubeIframeAPIReady = () => {
         if (e.data === YT.PlayerState.ENDED && (!playOnce || settings.repeat === "one")) advance(1, true);
         // 次の動画でも選択中の速度を維持する
         if (e.data === YT.PlayerState.PLAYING && player.getPlaybackRate() !== rate) player.setPlaybackRate(rate);
+        updatePlayIcons();
       },
       onError: () => { if (!playOnce) advance(1, true, true); },   // 再生不可動画はスキップ（1本だけ再生のときは進まない。単一動画リピートでも同じ動画を繰り返さない）
     },
@@ -631,6 +685,9 @@ function playVideo(playlistId, videoId, startSeconds = 0, once = false) {
   $("musicTitle").textContent = it ? it.title : "";
   $("musicThumb").src = it ? it.thumbnail_url : "";
   renderTree();
+  setTimeout(() => {
+    document.querySelector(".vlist li.playing")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, 60);
 }
 
 // ---- リピート / シャッフル ----

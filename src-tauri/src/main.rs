@@ -601,6 +601,18 @@ async fn get_playlist(app: App<'_>, conn: State<'_, ConnectLock>, handle: AppHan
             changed = true;
         }
 
+        let total_secs = pl.total_duration_secs();
+        {
+            let mut g = app.lock().await;
+            if let Some(s) = g.summaries.iter_mut().find(|s| s.id == playlist_id) {
+                if s.total_duration_secs == 0 && total_secs > 0 {
+                    s.total_duration_secs = total_secs;
+                    s.total_duration = pl.total_duration();
+                    changed = true;
+                }
+            }
+        }
+
         if changed {
             let mut g = app.lock().await;
             g.playlists.insert(playlist_id.clone(), pl.clone());
