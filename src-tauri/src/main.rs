@@ -1221,6 +1221,57 @@ async fn remove_playlist(app: App<'_>, handle: AppHandle, playlist_id: String) -
     Ok(list)
 }
 
+/// ウィンドウを確実に最前面に引き出してフォーカスする。
+/// Windows の Foreground Lock 仕様を回避するため、一瞬最前面フラグをトグルして Z-order トップへ上げる。
+fn bring_to_front(w: &tauri::WebviewWindow) {
+    let _ = w.unminimize();
+    let _ = w.show();
+    let _ = w.set_focus();
+    let _ = w.set_always_on_top(true);
+    let _ = w.set_always_on_top(false);
+    let _ = w.set_focus();
+}
+
+/// 既存の他のエディタウィンドウと完全に重なって裏に隠れてしまうのを防ぐため、
+/// 既存ウィンドウと同じ座標の場合は少し右下にずらす。
+fn adjust_editor_position(handle: &AppHandle, win: &tauri::WebviewWindow) {
+    let current_label = win.label().to_string();
+    let Ok(my_pos) = win.outer_position() else { return };
+
+    let other_positions: Vec<_> = handle
+        .webview_windows()
+        .into_iter()
+        .filter(|(lbl, _)| lbl.starts_with("editor-") && lbl != &current_label)
+        .filter_map(|(_, w)| w.outer_position().ok())
+        .collect();
+
+    if other_positions.is_empty() {
+        return;
+    }
+
+    let is_overlapping = other_positions
+        .iter()
+        .any(|p| (p.x - my_pos.x).abs() < 25 && (p.y - my_pos.y).abs() < 25);
+
+    if is_overlapping {
+        let new_x = my_pos.x + 30;
+        let new_y = my_pos.y + 30;
+
+        let monitors: Vec<_> = win
+            .available_monitors()
+            .unwrap_or_default()
+            .iter()
+            .map(|m| (m.position().x, m.position().y, m.size().width, m.size().height))
+            .collect();
+
+        if monitors.iter().any(|&(mx, my, mw, mh)| {
+            new_x + 50 >= mx && new_x < mx + mw as i32 && new_y + 20 >= my && new_y < my + mh as i32
+        }) {
+            let _ = win.set_position(tauri::PhysicalPosition::new(new_x, new_y));
+        }
+    }
+}
+
 /// 並べ替え専用ウィンドウを開く（既に開いていれば前面へ）。
 #[tauri::command]
 async fn open_editor(handle: AppHandle, playlist_id: String, title: String) -> Result<(), String> {
@@ -1230,7 +1281,8 @@ async fn open_editor(handle: AppHandle, playlist_id: String, title: String) -> R
         .collect();
     let label = format!("editor-{safe}");
     if let Some(w) = handle.get_webview_window(&label) {
-        return w.set_focus().map_err(|e| e.to_string());
+        bring_to_front(&w);
+        return Ok(());
     }
     let win = WebviewWindowBuilder::new(&handle, &label, WebviewUrl::App(format!("editor.html?id={safe}").into()))
         .title(format!("並べ替え - {title}"))
@@ -1241,7 +1293,8 @@ async fn open_editor(handle: AppHandle, playlist_id: String, title: String) -> R
         .build()
         .map_err(|e| e.to_string())?;
     winstate::restore(&win);
-    let _ = win.show();
+    adjust_editor_position(&handle, &win);
+    bring_to_front(&win);
     Ok(())
 }
 

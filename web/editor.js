@@ -243,3 +243,5 @@ listen("playlist-changed", async (e) => {
   if (e.payload !== playlistId) return;
   try { setState(await invoke("get_playlist", { playlistId })); } catch (_) {}
 });
+
+window.focus();
