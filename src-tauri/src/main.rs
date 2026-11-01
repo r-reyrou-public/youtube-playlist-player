@@ -35,12 +35,25 @@ impl Inner {
         }
     }
 
-    /// 一覧の並びを変える: id のリストを before の直前へ移す（before が None なら末尾へ）。
-    fn move_summary(&mut self, id: &str, before: Option<&str>) {
-        let Some(from) = self.summaries.iter().position(|s| s.id == id) else { return };
-        let item = self.summaries.remove(from);
-        let at = before.and_then(|b| self.summaries.iter().position(|s| s.id == b)).unwrap_or(self.summaries.len());
-        self.summaries.insert(at, item);
+    /// 一覧の並びを変える: from_id のリストを target_id の before または after へ移す。
+    fn move_summary(&mut self, from_id: &str, target_id: Option<&str>, position: Option<&str>) {
+        let Some(from_pos) = self.summaries.iter().position(|s| s.id == from_id) else { return };
+        let item = self.summaries.remove(from_pos);
+
+        let at = match (target_id, position) {
+            (Some(tid), Some("after")) => {
+                self.summaries.iter().position(|s| s.id == tid).map(|p| p + 1).unwrap_or(self.summaries.len())
+            }
+            (Some(tid), Some("before")) => {
+                self.summaries.iter().position(|s| s.id == tid).unwrap_or(self.summaries.len())
+            }
+            (Some(tid), None) => {
+                // 旧API互換: tid の直前に配置
+                self.summaries.iter().position(|s| s.id == tid).unwrap_or(self.summaries.len())
+            }
+            _ => self.summaries.len(),
+        };
+        self.summaries.insert(at.min(self.summaries.len()), item);
     }
 
     /// 一覧用の要約。読み込み済みのリストは、編集中の件数・タイトル・新規かどうかを反映する。
@@ -227,12 +240,23 @@ async fn add_playlists(
     Ok(out)
 }
 
-/// 一覧でのリストの並び順を変える（通信なし）。before が None なら末尾へ。並びは cache.json に保存される。
+/// 一覧でのリストの並び順を変える（通信なし）。target_id の before/after、または before の直前へ。並びは cache.json に保存される。
 #[tauri::command]
-async fn move_summary(app: App<'_>, handle: AppHandle, playlist_id: String, before: Option<String>) -> Result<Vec<PlaylistSummary>, String> {
+async fn move_summary(
+    app: App<'_>,
+    handle: AppHandle,
+    from_id: Option<String>,
+    playlist_id: Option<String>,
+    target_id: Option<String>,
+    before: Option<String>,
+    position: Option<String>,
+) -> Result<Vec<PlaylistSummary>, String> {
     let out = {
         let mut g = app.lock().await;
-        g.move_summary(&playlist_id, before.as_deref());
+        let fid = from_id.or(playlist_id).unwrap_or_default();
+        let pos = position.as_deref().or(Some("before"));
+        let tid = target_id.as_deref().or(before.as_deref());
+        g.move_summary(&fid, tid, pos);
         g.list_summaries()
     };
     schedule_save(&handle);
@@ -1373,4 +1397,56 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run app");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_summary(id: &str) -> PlaylistSummary {
+        PlaylistSummary {
+            id: id.to_string(),
+            title: id.to_string(),
+            item_count: 0,
+            is_new: false,
+            total_duration_secs: 0,
+            total_duration: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_move_summary_before_and_after() {
+        let mut inner = Inner::default();
+        inner.summaries = vec![
+            make_summary("A"),
+            make_summary("B"),
+            make_summary("C"),
+            make_summary("D"),
+        ];
+
+        // C を A の前に移動 -> [C, A, B, D]
+        inner.move_summary("C", Some("A"), Some("before"));
+        let ids: Vec<&str> = inner.summaries.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["C", "A", "B", "D"]);
+
+        // A を D の後に移動 -> [C, B, D, A]
+        inner.move_summary("A", Some("D"), Some("after"));
+        let ids: Vec<&str> = inner.summaries.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["C", "B", "D", "A"]);
+
+        // D を B の後に移動 -> [C, B, D, A]
+        inner.move_summary("D", Some("B"), Some("after"));
+        let ids: Vec<&str> = inner.summaries.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["C", "B", "D", "A"]);
+
+        // A を C の前に移動 -> [A, C, B, D]
+        inner.move_summary("A", Some("C"), Some("before"));
+        let ids: Vec<&str> = inner.summaries.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "C", "B", "D"]);
+
+        // A を None (末尾) に移動 -> [C, B, D, A]
+        inner.move_summary("A", None, None);
+        let ids: Vec<&str> = inner.summaries.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["C", "B", "D", "A"]);
+    }
 }

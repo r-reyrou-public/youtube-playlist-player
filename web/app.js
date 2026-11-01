@@ -153,13 +153,17 @@ function renderTree() {
     // リスト名を別のリスト名へドラッグすると、その動画を丸ごと取り込む（コピー）
     head.draggable = true;
     head.addEventListener("dragstart", (e) => {
+      if (e.target.closest(".plPlayBtn") || e.target.closest(".arrow")) {
+        e.preventDefault();
+        return;
+      }
       dragList = s.id;
-      e.dataTransfer.effectAllowed = "copy";
+      e.dataTransfer.effectAllowed = "copyMove";
       e.dataTransfer.setData("text/plain", s.title);
     });
     head.addEventListener("dragend", () => {
       dragList = null;
-      document.querySelectorAll(".dropTarget").forEach((el) => el.classList.remove("dropTarget"));
+      document.querySelectorAll(".dropTarget, .dropBefore, .dropAfter").forEach((el) => el.classList.remove("dropTarget", "dropBefore", "dropAfter"));
     });
     // 行の上端・下端にドロップすると並び順の変更、中央にドロップすると取り込み（コピー）
     const zone = (e) => {
@@ -185,9 +189,7 @@ function renderTree() {
       dragList = null;
       if (!from || from.id === s.id) return;
       if (z !== "import") {
-        const i = summaries.findIndex((x) => x.id === s.id);
-        const before = z === "before" ? s.id : (summaries[i + 1] ? summaries[i + 1].id : null);
-        await moveList(from.id, before);
+        await moveList(from.id, s.id, z);
         return;
       }
       if (!confirm(`「${from.title}」の動画（${from.item_count}本）を、「${s.title}」の末尾に取り込みます。\n元のリストは変わりません。YouTube への反映は Push で行います。\n続行しますか？`)) return;
@@ -204,9 +206,9 @@ function renderTree() {
   updatePlayIcons();
 }
 
-// リストの並び順を変える（before の直前へ。null なら末尾へ）
-async function moveList(id, before) {
-  const list = await call("move_summary", { playlistId: id, before });
+// リストの並び順を変える（targetId の before または after へ）
+async function moveList(fromId, targetId, position) {
+  const list = await call("move_summary", { fromId, targetId, position });
   if (!list) return;
   summaries = list;
   renderTree();
@@ -301,16 +303,9 @@ function renderChildren(id) {
     vPlay.addEventListener("dblclick", (e) => e.stopPropagation());
     li.querySelector(".title").textContent = it.title;
     li.title = "クリックで選択 / ダブルクリックまたは▶で再生 / 左のハンドルをドラッグで並べ替え";
-    li.draggable = false;
-    const handle = li.querySelector(".handle");
-    handle.addEventListener("mousedown", () => {
-      li.draggable = true;
-      // ハンドル外で離しても、行全体がドラッグ可能なまま残らないようにする
-      document.addEventListener("mouseup", () => { li.draggable = false; }, { once: true });
-    });
+    li.draggable = true;
     li.addEventListener("dragend", () => {
       drag = null;
-      li.draggable = false;
       document.querySelectorAll(".dragover").forEach((el) => el.classList.remove("dragover"));
     });
     li.addEventListener("dblclick", () => playVideo(id, it.video_id));
@@ -335,17 +330,36 @@ function renderChildren(id) {
         { label: n > 1 ? `選んだ ${n}本をリストから外す` : "リストから外す", danger: true, fn: () => removeSelected(id, it.playlist_item_id) },
       ]);
     });
-    li.addEventListener("dragstart", (e) => { drag = { id, idx }; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(idx)); });
-    li.addEventListener("dragover", (e) => { if (drag && drag.id === id) { e.preventDefault(); li.classList.add("dragover"); } });
+    li.addEventListener("dragstart", (e) => {
+      if (!e.target.closest(".handle")) {
+        e.preventDefault();
+        return;
+      }
+      drag = { id, idx };
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(idx));
+    });
+    li.addEventListener("dragover", (e) => {
+      if (drag && drag.id === id) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        li.classList.add("dragover");
+      }
+    });
     li.addEventListener("dragleave", () => li.classList.remove("dragover"));
     li.addEventListener("drop", async (e) => {
       e.preventDefault();
+      e.stopPropagation();
       const from = drag;
       drag = null;
-      if (!from || from.id !== id || from.idx === idx) { renderTree(); return; }
+      document.querySelectorAll(".dragover").forEach((el) => el.classList.remove("dragover"));
+      if (!from || from.id !== id || from.idx === idx) { return; }
       const s = await call("move_item", { playlistId: id, fromIndex: from.idx, toIndex: idx });
-      if (s) cache[id] = s;
-      renderTree();
+      if (s) {
+        cache[id] = s;
+        renderTree();
+        refreshPush();
+      }
     });
     ul.appendChild(li);
   });

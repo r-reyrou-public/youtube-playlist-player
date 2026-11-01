@@ -129,15 +129,9 @@ function render() {
     if (it.is_new) li.classList.add("isnew");
     li.innerHTML = `<span class="handle" title="ドラッグして並べ替え">⠿</span><span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>${it.duration ? `<span class="duration">${it.duration}</span>` : ""}` +
       `<span class="mv"><button class="up" title="1つ上へ">▲</button><button class="down" title="1つ下へ">▼</button></span>`;
-    const handle = li.querySelector(".handle");
-    handle.addEventListener("mousedown", () => {
-      li.draggable = true;
-      // ハンドル外で離しても、行全体がドラッグ可能なまま残らないようにする
-      document.addEventListener("mouseup", () => { li.draggable = false; }, { once: true });
-    });
+    li.draggable = true;
     li.addEventListener("dragend", () => {
       dragFrom = null;
-      li.draggable = false;
       document.querySelectorAll(".dragover").forEach((el) => el.classList.remove("dragover"));
     });
     li.querySelector(".up").disabled = idx === 0;
@@ -165,6 +159,10 @@ function render() {
       ]);
     });
     li.addEventListener("dragstart", (e) => {
+      if (!e.target.closest(".handle")) {
+        e.preventDefault();
+        return;
+      }
       dragFrom = idx;
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData("text/plain", it.title);
