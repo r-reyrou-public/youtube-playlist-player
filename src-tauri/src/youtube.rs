@@ -313,13 +313,17 @@ impl InstalledFlowDelegate for BrowserDelegate {
     }
 }
 
-#[derive(Clone, Serialize, serde::Deserialize)]
+#[derive(Clone, Serialize, serde::Deserialize, Default)]
 pub struct PlaylistSummary {
     pub id: String,
     pub title: String,
     pub item_count: usize,
     /// 手元だけで作成した、まだ YouTube に無いリスト。
     pub is_new: bool,
+    #[serde(default)]
+    pub total_duration_secs: u32,
+    #[serde(default)]
+    pub total_duration: String,
 }
 
 #[derive(Clone)]
@@ -408,6 +412,8 @@ impl YouTube {
                     title: it["snippet"]["title"].as_str().unwrap_or_default().into(),
                     item_count: it["contentDetails"]["itemCount"].as_u64().unwrap_or(0) as usize,
                     is_new: false,
+                    total_duration_secs: 0,
+                    total_duration: String::new(),
                 });
             }
             page_token = body["nextPageToken"].as_str().map(str::to_string);
@@ -431,7 +437,7 @@ impl YouTube {
                 }
                 // 一覧に出てこない場合でも、動画の取得（playlistItems）はできるので、既定の名前で追加する
                 let found = self.fetch_summaries(("id", id)).await.ok().and_then(|mut v| v.pop());
-                let mut s = found.unwrap_or(PlaylistSummary { id: id.to_string(), title: String::new(), item_count: 0, is_new: false });
+                let mut s = found.unwrap_or(PlaylistSummary { id: id.to_string(), title: String::new(), item_count: 0, is_new: false, total_duration_secs: 0, total_duration: String::new() });
                 if s.title.is_empty() {
                     s.title = title.to_string();
                 }
@@ -535,6 +541,8 @@ impl YouTube {
                     title: "アップロード動画（すべての動画）".to_string(),
                     item_count: 0,
                     is_new: false,
+                    total_duration_secs: 0,
+                    total_duration: String::new(),
                 });
                 if s.title.is_empty() {
                     s.title = "アップロード動画（すべての動画）".to_string();

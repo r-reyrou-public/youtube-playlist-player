@@ -43,6 +43,20 @@ async function setState(s) {
   state = s;
   for (const id of [...selected]) if (!s.items.some((it) => it.playlist_item_id === id)) selected.delete(id);   // 外した・移した動画は選択から除く
   $("plTitle").textContent = s.title;
+  const totalSecs = (s.items || []).reduce((acc, it) => acc + (it.duration_secs || 0), 0);
+  const durStr = totalSecs > 0 ? Common.formatDuration(totalSecs) : "";
+  const durEl = $("plDuration");
+  if (durEl) {
+    if (durStr) {
+      durEl.textContent = `${s.items.length}本 (${durStr})`;
+      durEl.hidden = false;
+      durEl.title = `総再生時間: ${Common.formatDurationFriendly(totalSecs)}`;
+    } else {
+      durEl.textContent = `${s.items.length}本`;
+      durEl.hidden = false;
+      durEl.title = "";
+    }
+  }
   render();
   const n = await invoke("pending_count", { playlistId });
   $("writeBtn").textContent = `YouTubeへ反映 (${n}件 / ${n * 50}ユニット)`;

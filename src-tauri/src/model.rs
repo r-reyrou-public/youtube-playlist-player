@@ -395,6 +395,21 @@ impl Playlist {
         changed
     }
 
+    /// プレイリスト全体の総再生時間（秒数）。
+    pub fn total_duration_secs(&self) -> u32 {
+        self.items
+            .iter()
+            .map(|it| it.duration_secs as u64)
+            .sum::<u64>()
+            .min(u32::MAX as u64) as u32
+    }
+
+    /// プレイリスト全体の総再生時間をフォーマットした文字列（例: "1:23:45", "12:30"）。
+    #[allow(dead_code)]
+    pub fn total_duration(&self) -> String {
+        format_duration(self.total_duration_secs())
+    }
+
     pub fn dedup(&mut self) -> usize {
         let mut seen = std::collections::HashSet::new();
         let mut n = 0;
@@ -774,6 +789,17 @@ mod tests {
         assert_eq!(format_duration(60), "1:00");
         assert_eq!(format_duration(83), "1:23");
         assert_eq!(format_duration(3723), "1:02:03");
+    }
+
+    #[test]
+    fn playlist_total_duration() {
+        let items = vec![
+            PlaylistItem { duration_secs: 120, ..Default::default() },
+            PlaylistItem { duration_secs: 3605, ..Default::default() },
+        ];
+        let pl = Playlist::new("test".into(), "Title".into(), items);
+        assert_eq!(pl.total_duration_secs(), 3725);
+        assert_eq!(pl.total_duration(), "1:02:05");
     }
 
     #[test]

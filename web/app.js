@@ -42,21 +42,73 @@ async function call(cmd, args) {
   }
 }
 
+// プレイリストを先頭から（またはシャッフルして）直接再生する
+async function playPlaylist(id, shuffle = false) {
+  if (!playerReady) { status("プレイヤーの準備ができていません"); return; }
+  let pl = cache[id];
+  if (!pl || !pl.items || !pl.items.length) {
+    status("プレイリストを読み込み中...");
+    pl = await call("get_playlist", { playlistId: id });
+    if (pl) {
+      cache[id] = pl;
+      summaries = await invoke("list_summaries");
+      renderTree();
+    }
+  }
+  if (!pl || !pl.items || !pl.items.length) {
+    status("再生できる動画がありません");
+    return;
+  }
+  let target = pl.items[0];
+  if (shuffle) {
+    const idx = Math.floor(Math.random() * pl.items.length);
+    target = pl.items[idx];
+  }
+  playVideo(id, target.video_id);
+  status(`「${pl.title}」を${shuffle ? "シャッフル" : ""}再生開始`);
+}
+
 // ---- 左ペイン: プレイリストのツリー ----
 function renderTree() {
   const ul = $("tree");
   ul.innerHTML = "";
   for (const s of summaries) {
     const li = document.createElement("li");
+    const isPlaying = s.id === nowPlaylistId;
+    if (isPlaying) li.classList.add("playing");
     const head = document.createElement("div");
-    head.className = "plname";
+    head.className = "plname" + (isPlaying ? " playing" : "");
     const got = cache[s.id] && cache[s.id].fetched_at;
-    head.title = "クリックで展開 / ダブルクリックで並べ替えウィンドウ / ドラッグ: 上下の端にドロップで並び順の変更、中央にドロップで動画の取り込み" + (got ? `\n取得: ${new Date(got * 1000).toLocaleString("ja-JP")} 時点（右クリックで最新を取得）` : "");
-    head.innerHTML = '<span class="arrow"></span><span class="name"></span><span class="badge" hidden>新規</span><span class="cnt"></span>';
+    const pl = cache[s.id];
+    let totalSecs = s.total_duration_secs || 0;
+    if (pl && pl.items) {
+      totalSecs = pl.items.reduce((acc, it) => acc + (it.duration_secs || 0), 0);
+    }
+    const durStr = totalSecs > 0 ? Common.formatDuration(totalSecs) : (s.total_duration || "");
+    const durTip = totalSecs > 0 ? `\n総再生時間: ${Common.formatDurationFriendly(totalSecs)}` : "";
+
+    head.title = "クリックで展開 / ダブルクリックで並べ替えウィンドウ / ドラッグ: 上下の端にドロップで並び順の変更、中央にドロップで動画の取り込み" + (got ? `\n取得: ${new Date(got * 1000).toLocaleString("ja-JP")} 時点（右クリックで最新を取得）` : "") + durTip;
+    head.innerHTML = '<span class="arrow"></span><button class="plPlayBtn" title="このリストを再生">▶</button><span class="name"></span><span class="badge" hidden>新規</span><span class="plMeta"><span class="cnt"></span><span class="plDuration" hidden></span></span>';
     head.querySelector(".arrow").textContent = expanded.has(s.id) ? "▼" : "▶";
+
+    const playBtn = head.querySelector(".plPlayBtn");
+    if (isPlaying) playBtn.classList.add("playing");
+    playBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      playPlaylist(s.id);
+    });
+
     head.querySelector(".name").textContent = s.title;
     head.querySelector(".badge").hidden = !s.is_new;
-    head.querySelector(".cnt").textContent = s.item_count;
+    head.querySelector(".cnt").textContent = `${s.item_count}本`;
+    const durEl = head.querySelector(".plDuration");
+    if (durStr) {
+      durEl.textContent = durStr;
+      durEl.hidden = false;
+      durEl.title = `総再生時間: ${Common.formatDurationFriendly(totalSecs) || durStr}`;
+    } else {
+      durEl.hidden = true;
+    }
     // リスト名を別のリスト名へドラッグすると、その動画を丸ごと取り込む（コピー）
     head.draggable = true;
     head.addEventListener("dragstart", (e) => {
@@ -183,10 +235,20 @@ function renderChildren(id) {
     const li = document.createElement("li");
     if (id === nowPlaylistId && it.video_id === nowVideoId) li.classList.add("playing");
     if (it.is_new) li.classList.add("isnew");
-    li.innerHTML = `<span class="handle" title="ドラッグして並べ替え">⠿</span><span class="no">${idx + 1}</span><img loading="lazy"><span class="title"></span>${it.duration ? `<span class="duration">${it.duration}</span>` : ""}`;
-    li.querySelector("img").src = it.thumbnail_url;
+    li.innerHTML = `<span class="handle" title="ドラッグして並べ替え">⠿</span><button class="vPlayBtn" title="この動画を再生">▶</button><span class="no">${idx + 1}</span><img loading="lazy" title="クリックで再生"><span class="title"></span>${it.duration ? `<span class="duration">${it.duration}</span>` : ""}`;
+    const img = li.querySelector("img");
+    img.src = it.thumbnail_url;
+    img.addEventListener("click", (e) => {
+      e.stopPropagation();
+      playVideo(id, it.video_id);
+    });
+    const vPlay = li.querySelector(".vPlayBtn");
+    vPlay.addEventListener("click", (e) => {
+      e.stopPropagation();
+      playVideo(id, it.video_id);
+    });
     li.querySelector(".title").textContent = it.title;
-    li.title = "ダブルクリックで再生 / 左のハンドルをドラッグで並べ替え";
+    li.title = "クリックで選択 / ダブルクリックまたは▶で再生 / 左のハンドルをドラッグで並べ替え";
     li.draggable = false;
     const handle = li.querySelector(".handle");
     handle.addEventListener("mousedown", () => {
@@ -263,6 +325,16 @@ const shiftList = async (delta) => {
   // 上へ: 一つ上の直前 / 下へ: 一つ下のさらに次の直前（末尾なら null）
   const before = delta < 0 ? summaries[j].id : (summaries[j + 1] ? summaries[j + 1].id : null);
   await moveList(s.id, before);
+};
+$("ctxPlay").onclick = async () => {
+  const s = ctxTarget;
+  hideCtx();
+  if (s) await playPlaylist(s.id, false);
+};
+$("ctxShuffle").onclick = async () => {
+  const s = ctxTarget;
+  hideCtx();
+  if (s) await playPlaylist(s.id, true);
 };
 $("ctxUp").onclick = () => shiftList(-1);
 $("ctxDown").onclick = () => shiftList(1);

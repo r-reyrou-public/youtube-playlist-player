@@ -53,10 +53,80 @@ dialog a { color: #6af; cursor: pointer; text-decoration: underline; }
 #tree, .vlist { list-style: none; margin: 0; padding: 0; }
 #tree > li > .plname { display: flex; gap: 6px; align-items: center; padding: 8px; cursor: pointer; background: #202020; border-bottom: 1px solid #2c2c2c; user-select: none; }
 #tree > li > .plname:hover { background: #2a2a2a; }
+#tree > li > .plname.playing { background: #1a2e22; border-left: 3px solid #2ba640; }
+#tree > li > .plname.playing:hover { background: #223c2c; }
 #tree .arrow { width: 14px; color: #aaa; }
-#tree .cnt { margin-left: auto; font-size: 12px; color: #888; }
+#tree .plPlayBtn {
+  background: transparent;
+  border: 1px solid #555;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ccc;
+  font-size: 9px;
+  cursor: pointer;
+  padding: 0;
+  margin-right: 2px;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+#tree .plPlayBtn:hover {
+  background: #3ea6ff;
+  border-color: #3ea6ff;
+  color: #000;
+  transform: scale(1.15);
+}
+#tree > li > .plname.playing .plPlayBtn {
+  background: #2ba640;
+  border-color: #2ba640;
+  color: #fff;
+}
+#tree .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tree .plMeta { margin-left: auto; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+#tree .cnt { font-size: 12px; color: #888; }
+.plDuration {
+  font-size: 11px;
+  color: #aaa;
+  background: #181818;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-variant-numeric: tabular-nums;
+}
 #tree .children { padding-left: 14px; }
 #tree .children .msg { padding: 6px 8px; color: #888; font-size: 12px; }
+.ctxSep { height: 1px; background: #3f3f3f; margin: 4px 0; }
+.vlist img { cursor: pointer; transition: transform 0.1s ease; }
+.vlist img:hover { transform: scale(1.05); }
+.vlist .vPlayBtn {
+  background: transparent;
+  border: 1px solid #444;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #bbb;
+  font-size: 9px;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+.vlist .vPlayBtn:hover {
+  background: #3ea6ff;
+  border-color: #3ea6ff;
+  color: #000;
+  transform: scale(1.15);
+}
+.vlist li.playing .vPlayBtn {
+  background: #2ba640;
+  border-color: #2ba640;
+  color: #fff;
+}
 .vlist li { display: flex; gap: 8px; align-items: center; padding: 4px 8px; border-bottom: 1px solid #262626; }
 .vlist li:hover { background: #262626; }
 .vlist li.playing { background: #3a1a1a; }

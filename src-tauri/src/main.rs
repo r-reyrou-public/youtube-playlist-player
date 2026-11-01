@@ -54,6 +54,9 @@ impl Inner {
                     s.item_count = p.items.len();
                     s.title = p.title.clone();
                     s.is_new = p.remote_id.is_none();
+                    let secs = p.total_duration_secs();
+                    s.total_duration_secs = secs;
+                    s.total_duration = p.total_duration();
                 }
                 s
             })
@@ -256,7 +259,14 @@ async fn create_playlist(app: App<'_>, handle: AppHandle, title: String) -> Resu
         let mut g = app.lock().await;
         let id = g.next_local_id();
         g.playlists.insert(id.clone(), Playlist::new_local(id.clone(), title.clone()));
-        g.summaries.push(PlaylistSummary { id: id.clone(), title, item_count: 0, is_new: true });
+        g.summaries.push(PlaylistSummary {
+            id: id.clone(),
+            title,
+            item_count: 0,
+            is_new: true,
+            total_duration_secs: 0,
+            total_duration: String::new(),
+        });
         (id, g.list_summaries())
     };
     notify(&handle, &id);
@@ -441,11 +451,22 @@ async fn copy_peeked(
             added += 1;
         }
         let total_items = pl.items.len();
+        let total_secs = pl.total_duration_secs();
+        let dur_str = pl.total_duration();
         g.playlists.insert(id.clone(), pl);
         if is_new {
-            g.summaries.push(PlaylistSummary { id: id.clone(), title: title.clone(), item_count: added, is_new: true });
+            g.summaries.push(PlaylistSummary {
+                id: id.clone(),
+                title: title.clone(),
+                item_count: added,
+                is_new: true,
+                total_duration_secs: total_secs,
+                total_duration: dur_str,
+            });
         } else if let Some(s) = g.summaries.iter_mut().find(|s| s.id == id) {
             s.item_count = total_items;
+            s.total_duration_secs = total_secs;
+            s.total_duration = dur_str;
         }
         (id, title, added, skipped)
     };
@@ -585,6 +606,9 @@ async fn get_playlist(app: App<'_>, conn: State<'_, ConnectLock>, handle: AppHan
             g.playlists.insert(playlist_id.clone(), pl.clone());
             if let Some(s) = g.summaries.iter_mut().find(|s| s.id == playlist_id) {
                 s.item_count = pl.items.len();
+                let secs = pl.total_duration_secs();
+                s.total_duration_secs = secs;
+                s.total_duration = pl.total_duration();
             }
             drop(g);
             schedule_save(&handle);
@@ -598,6 +622,9 @@ async fn get_playlist(app: App<'_>, conn: State<'_, ConnectLock>, handle: AppHan
     let mut g = app.lock().await;
     if let Some(s) = g.summaries.iter_mut().find(|s| s.id == playlist_id) {
         s.item_count = pl.items.len();
+        let secs = pl.total_duration_secs();
+        s.total_duration_secs = secs;
+        s.total_duration = pl.total_duration();
     }
     let out = g.playlists.entry(playlist_id.clone()).or_insert(pl).clone();
     drop(g);
@@ -623,18 +650,20 @@ async fn remove_shorts(
     };
 
     for pid in target_ids {
-        let mut updated_len = None;
+        let mut updated_info = None;
         if let Some(p) = g.playlists.get_mut(&pid) {
             let removed = p.remove_shorts();
             if removed > 0 {
                 total_removed += removed;
                 affected_ids.push(pid.clone());
-                updated_len = Some(p.items.len());
+                updated_info = Some((p.items.len(), p.total_duration_secs()));
             }
         }
-        if let Some(len) = updated_len {
+        if let Some((len, secs)) = updated_info {
             if let Some(s) = g.summaries.iter_mut().find(|s| s.id == pid) {
                 s.item_count = len;
+                s.total_duration_secs = secs;
+                s.total_duration = crate::model::format_duration(secs);
             }
         }
     }

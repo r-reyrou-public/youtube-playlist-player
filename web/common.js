@@ -795,5 +795,23 @@ const Common = (() => {
     }
   }
 
-  return { askText, showMenu, hideMenu, openPicker, openImporter, openPublicList, openChannelPlaylists, openChannelForVideo, openFinder, openPush, parseVideoInput };
+  function formatDuration(secs) {
+    if (!secs || secs <= 0) return "";
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
+  function formatDurationFriendly(secs) {
+    if (!secs || secs <= 0) return "";
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return `${h}時間${m}分${s}秒`;
+    return `${m}分${s}秒`;
+  }
+
+  return { askText, showMenu, hideMenu, openPicker, openImporter, openPublicList, openChannelPlaylists, openChannelForVideo, openFinder, openPush, parseVideoInput, formatDuration, formatDurationFriendly };
 })();
