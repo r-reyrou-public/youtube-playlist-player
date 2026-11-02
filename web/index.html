@@ -16,7 +16,9 @@
   <button id="ctxFind">検索・並べ替え…</button>
   <button id="ctxRefresh">YouTubeから最新を取得</button>
   <button id="ctxImport">他のリストの動画を取り込む…</button>
-  <button id="ctxDedup">重複した動画を削除</button>
+  <button id="ctxCompare">他のリストと比較（重複チェック）…</button>
+  <button id="ctxDedupModal">重複チェック（プレビュー表示）…</button>
+  <button id="ctxDedup">このリスト内の重複を即座に削除</button>
   <button id="ctxShorts">ショート動画を削除</button>
   <button id="ctxRemove">削除（一覧から外す）</button>
 </div>
@@ -74,19 +76,36 @@
   <div class="dlgBtns"><button id="helpClose">閉じる</button></div>
 </dialog>
 <dialog id="dedupDlg">
-  <h3>重複チェック</h3>
+  <h3>重複チェック・リスト比較</h3>
   <div class="dedupBar">
-    <label>対象リスト: <select id="dedupTarget"></select></label>
+    <label>モード:
+      <select id="dedupMode">
+        <option value="single">リスト内の重複</option>
+        <option value="compare">2つのリストを比較</option>
+        <option value="all">全リスト横断で比較</option>
+      </select>
+    </label>
+    <div id="dedupSingleControls" class="dedupModeControls">
+      <label>対象: <select id="dedupTarget"></select></label>
+    </div>
+    <div id="dedupCompareControls" class="dedupModeControls" style="display:none;">
+      <label>基準A: <select id="dedupTargetA"></select></label>
+      <button id="dedupSwapBtn" title="基準リストAと比較対象リストBを入れ替えます">⇄</button>
+      <label>比較先B: <select id="dedupTargetB"></select></label>
+    </div>
+    <div id="dedupAllControls" class="dedupModeControls" style="display:none;">
+      <span class="dedupNote">すべてのプレイリスト間の共通動画を検出</span>
+    </div>
     <button id="dedupScanBtn">再チェック</button>
     <span class="sepv"></span>
-    <button id="dedupSelDupes" title="2件目以降の重複分にチェックを入れます">重複分のみ選択</button>
+    <button id="dedupSelDupes" title="重複動画（比較先リスト側や2件目以降）にチェックを入れます">重複分のみ選択</button>
     <button id="dedupSelAll" title="すべてのアイテムを選択します">全選択</button>
     <button id="dedupSelClear" title="すべての選択を解除します">全解除</button>
     <span class="grow"></span>
     <span id="dedupSummaryText" class="pkVideo"></span>
   </div>
   <div id="dedupList" class="dedupContainer"></div>
-  <p class="note">※ 選択した動画はプレイリストから外されます。YouTube への反映はメイン画面の「Push」で行われます。</p>
+  <p class="note">※ チェックを入れた動画がプレイリストから外されます（YouTube への反映はメイン画面の「Push」で行われます）。</p>
   <div class="dlgBtns">
     <button id="dedupDeleteBtn" class="danger" disabled>選択した動画を削除 (0件)</button>
     <button id="dedupCloseBtn">閉じる</button>

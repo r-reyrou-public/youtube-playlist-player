@@ -443,6 +443,18 @@ $("ctxImport").onclick = async () => {
   const r = await Common.openImporter(s);
   if (r) status(importMsg(s, r));
 };
+$("ctxCompare").onclick = async () => {
+  const s = ctxTarget;
+  hideCtx();
+  if (!s) return;
+  openDedupModal("compare", s.id);
+};
+$("ctxDedupModal").onclick = async () => {
+  const s = ctxTarget;
+  hideCtx();
+  if (!s) return;
+  openDedupModal("single", s.id);
+};
 $("ctxDedup").onclick = async () => {
   const s = ctxTarget;
   hideCtx();
@@ -908,27 +920,82 @@ const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "
 // ---- 重複チェック（ハンバーガーメニュー内） ----
 let dedupGroups = [];
 
-async function openDedupModal() {
+async function openDedupModal(initialMode = "single", initialA = null, initialB = null) {
   const dlg = $("dedupDlg");
+  const modeSel = $("dedupMode");
+  const singleControls = $("dedupSingleControls");
+  const compareControls = $("dedupCompareControls");
+  const allControls = $("dedupAllControls");
+
   const targetSel = $("dedupTarget");
+  const targetSelA = $("dedupTargetA");
+  const targetSelB = $("dedupTargetB");
+  const swapBtn = $("dedupSwapBtn");
+
   const listEl = $("dedupList");
   const summaryText = $("dedupSummaryText");
   const delBtn = $("dedupDeleteBtn");
 
-  targetSel.innerHTML = "";
-  const optAll = document.createElement("option");
-  optAll.value = "";
-  optAll.textContent = "すべてのプレイリスト";
-  targetSel.appendChild(optAll);
-  for (const s of summaries) {
-    const opt = document.createElement("option");
-    opt.value = s.id;
-    opt.textContent = `${s.title} (${s.item_count}本)`;
-    targetSel.appendChild(opt);
+  function populateSelect(sel, includeAll = false) {
+    sel.innerHTML = "";
+    if (includeAll) {
+      const optAll = document.createElement("option");
+      optAll.value = "";
+      optAll.textContent = "すべてのプレイリスト";
+      sel.appendChild(optAll);
+    }
+    for (const s of summaries) {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      opt.textContent = `${s.title} (${s.item_count}本)`;
+      sel.appendChild(opt);
+    }
   }
-  if (selected.id && summaries.some((s) => s.id === selected.id)) {
+
+  populateSelect(targetSel, true);
+  populateSelect(targetSelA, false);
+  populateSelect(targetSelB, false);
+
+  modeSel.value = initialMode;
+  if (initialA && summaries.some((s) => s.id === initialA)) {
+    targetSel.value = initialA;
+    targetSelA.value = initialA;
+  } else if (selected.id && summaries.some((s) => s.id === selected.id)) {
     targetSel.value = selected.id;
+    targetSelA.value = selected.id;
   }
+
+  if (initialB && summaries.some((s) => s.id === initialB)) {
+    targetSelB.value = initialB;
+  } else {
+    const other = summaries.find((s) => s.id !== targetSelA.value);
+    if (other) targetSelB.value = other.id;
+  }
+
+  function updateModeUi() {
+    const m = modeSel.value;
+    singleControls.style.display = (m === "single") ? "inline-flex" : "none";
+    compareControls.style.display = (m === "compare") ? "inline-flex" : "none";
+    allControls.style.display = (m === "all") ? "inline-flex" : "none";
+  }
+  updateModeUi();
+
+  modeSel.onchange = () => {
+    updateModeUi();
+    renderDuplicates();
+  };
+
+  swapBtn.onclick = () => {
+    const tmp = targetSelA.value;
+    targetSelA.value = targetSelB.value;
+    targetSelB.value = tmp;
+    renderDuplicates();
+  };
+
+  targetSel.onchange = renderDuplicates;
+  targetSelA.onchange = renderDuplicates;
+  targetSelB.onchange = renderDuplicates;
+  $("dedupScanBtn").onclick = renderDuplicates;
 
   function getCheckedCount() {
     return listEl.querySelectorAll("input.dedupCb:checked").length;
@@ -940,20 +1007,48 @@ async function openDedupModal() {
     delBtn.textContent = `選択した動画を削除 (${n}件)`;
   }
 
+  async function ensurePlaylistLoaded(pid) {
+    if (!pid) return;
+    if (!cache[pid]) {
+      cache[pid] = await call("get_playlist", { playlistId: pid });
+    }
+  }
+
   async function renderDuplicates() {
     listEl.innerHTML = "";
     delBtn.disabled = true;
     delBtn.textContent = "選択した動画を削除 (0件)";
     summaryText.textContent = "検索中...";
 
-    const targetId = targetSel.value;
+    const m = modeSel.value;
+    let dedupGroups = [];
+
     try {
-      if (targetId) {
-        if (!cache[targetId]) {
-          cache[targetId] = await call("get_playlist", { playlistId: targetId });
+      if (m === "single") {
+        const targetId = targetSel.value;
+        if (targetId) await ensurePlaylistLoaded(targetId);
+        dedupGroups = await invoke("find_duplicates", { playlistId: targetId || null });
+      } else if (m === "compare") {
+        const a = targetSelA.value;
+        const b = targetSelB.value;
+        if (!a || !b) {
+          summaryText.textContent = "";
+          listEl.innerHTML = '<div class="pkMsg">比較するプレイリストを2つ選択してください。</div>';
+          return;
         }
+        if (a === b) {
+          summaryText.textContent = "";
+          listEl.innerHTML = '<div class="pkMsg">基準リストAと比較先リストBには異なるプレイリストを選択してください。</div>';
+          return;
+        }
+        await Promise.all([ensurePlaylistLoaded(a), ensurePlaylistLoaded(b)]);
+        dedupGroups = await invoke("compare_duplicates", { playlistIds: [a, b] });
+      } else if (m === "all") {
+        for (const s of summaries) {
+          await ensurePlaylistLoaded(s.id);
+        }
+        dedupGroups = await invoke("compare_duplicates", { playlistIds: [] });
       }
-      dedupGroups = await invoke("find_duplicates", { playlistId: targetId || null });
     } catch (e) {
       summaryText.textContent = "";
       listEl.innerHTML = `<div class="pkMsg">${escapeHtml(String(e))}</div>`;
@@ -968,9 +1063,10 @@ async function openDedupModal() {
 
     let totalDupeItems = 0;
     for (const g of dedupGroups) {
-      totalDupeItems += (g.items.length - 1);
+      totalDupeItems += g.items.filter(it => it.is_duplicate).length;
     }
-    summaryText.textContent = `${dedupGroups.length} グループ (計 ${totalDupeItems} 件の重複)`;
+    const modeLabel = (m === "compare") ? "共通動画" : "重複";
+    summaryText.textContent = `${dedupGroups.length} 本の${modeLabel} (削除対象候補: ${totalDupeItems}件)`;
 
     for (const g of dedupGroups) {
       const gBox = document.createElement("div");
@@ -994,8 +1090,7 @@ async function openDedupModal() {
       metaDiv.className = "dedupMeta";
       metaDiv.innerHTML = `
         <span class="dedupChannel">${escapeHtml(g.channel || "")}</span>
-        <span class="dedupPl">${escapeHtml(g.playlist_title)}</span>
-        <span class="badge dupe">${g.items.length - 1}件重複 (計${g.items.length}件)</span>
+        <span class="badge dupe">${g.items.length} 箇所に存在</span>
         <button class="dedupPlayBtn">▶ 再生</button>
       `;
       metaDiv.querySelector(".dedupPlayBtn").onclick = () => { playVideo(g.playlist_id, g.video_id); };
@@ -1010,21 +1105,32 @@ async function openDedupModal() {
         const cb = document.createElement("input");
         cb.type = "checkbox";
         cb.className = "dedupCb";
-        cb.dataset.pid = g.playlist_id;
+        cb.dataset.pid = it.playlist_id || g.playlist_id;
         cb.dataset.id = it.playlist_item_id;
         cb.dataset.isDupe = it.is_duplicate ? "1" : "0";
         cb.checked = it.is_duplicate;
         cb.onchange = updateCount;
 
+        const plTag = document.createElement("span");
+        plTag.className = "dedupPlTag";
+        plTag.textContent = it.playlist_title || g.playlist_title || "リスト";
+        plTag.title = it.playlist_title || g.playlist_title || "";
+
         const badge = document.createElement("span");
         badge.className = `badge ${it.is_duplicate ? "badgeDupe" : "badgeOrig"}`;
-        badge.textContent = it.is_duplicate ? "重複" : "1件目 (保持)";
+        if (m === "compare") {
+          badge.textContent = it.is_duplicate ? "重複 (削除対象)" : "基準A (保持)";
+        } else if (m === "all") {
+          badge.textContent = it.is_duplicate ? "重複" : "1件目 (保持)";
+        } else {
+          badge.textContent = it.is_duplicate ? "重複" : "1件目 (保持)";
+        }
 
         const pos = document.createElement("span");
         pos.className = "dedupPos";
         pos.textContent = `位置 #${it.position + 1}`;
 
-        lbl.append(cb, badge, pos);
+        lbl.append(cb, plTag, badge, pos);
         itemsDiv.appendChild(lbl);
       }
 
@@ -1034,9 +1140,6 @@ async function openDedupModal() {
     }
     updateCount();
   }
-
-  targetSel.onchange = renderDuplicates;
-  $("dedupScanBtn").onclick = renderDuplicates;
 
   $("dedupSelDupes").onclick = () => {
     listEl.querySelectorAll("input.dedupCb").forEach((cb) => {
@@ -1083,6 +1186,7 @@ async function openDedupModal() {
           cache[pid] = await invoke("get_playlist", { playlistId: pid });
         } catch (_) {}
       }
+      summaries = await invoke("list_summaries");
       renderTree();
       refreshPush();
       alert(`${totalRemoved} 件の重複動画を削除しました。`);
@@ -1093,7 +1197,8 @@ async function openDedupModal() {
     }
   };
 
-  $("dedupCloseBtn").onclick = () => dlg.close();
+  $("dedupCloseBtn").onclick = () => { dlg.close(); };
+
   dlg.showModal();
   await renderDuplicates();
 }

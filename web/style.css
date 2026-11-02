@@ -281,6 +281,11 @@ dialog > input[type=text] { width: 100%; }
 #dedupDlg { width: min(740px, 94vw); max-height: 85vh; }
 .dedupBar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #333; margin-bottom: 10px; font-size: 13px; }
 .dedupBar select { max-width: 220px; }
+.dedupModeControls { display: inline-flex; align-items: center; gap: 6px; }
+.dedupNote { color: #aaa; font-size: 11px; }
+.dedupPlTag { background: #1e2638; color: #7db0ff; padding: 2px 7px; border-radius: 4px; font-size: 11px; border: 1px solid #32476d; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+#dedupSwapBtn { background: #333; border: 1px solid #555; padding: 2px 8px; border-radius: 4px; cursor: pointer; color: #eee; font-weight: bold; }
+#dedupSwapBtn:hover { background: #444; border-color: #888; }
 .dedupContainer { overflow-y: auto; display: flex; flex-direction: column; gap: 12px; min-height: 180px; max-height: 52vh; padding-right: 4px; }
 .dedupGroup { display: flex; gap: 12px; background: #1c1c1c; border: 1px solid #333; border-radius: 6px; padding: 10px; align-items: flex-start; }
 .dedupThumb { width: 120px; aspect-ratio: 16/9; object-fit: cover; border-radius: 4px; background: #000; flex-shrink: 0; cursor: pointer; }

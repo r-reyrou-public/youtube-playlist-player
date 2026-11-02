@@ -38,6 +38,10 @@ pub struct PlaylistItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DuplicateItemInfo {
     pub playlist_item_id: String,
+    #[serde(default)]
+    pub playlist_id: String,
+    #[serde(default)]
+    pub playlist_title: String,
     pub position: usize,
     pub is_duplicate: bool,
 }
@@ -344,6 +348,8 @@ impl Playlist {
                                 .enumerate()
                                 .map(|(idx, item)| DuplicateItemInfo {
                                     playlist_item_id: item.playlist_item_id.clone(),
+                                    playlist_id: self.playlist_id.clone(),
+                                    playlist_title: self.title.clone(),
                                     position: item.current_position,
                                     is_duplicate: idx > 0,
                                 })
@@ -355,6 +361,8 @@ impl Playlist {
         }
         groups
     }
+
+
 
     /// リスト内の重複動画（同じ video_id を持つ2回目以降のアイテム）を削除する。削除した件数を返す。
     /// ショート動画（再生時間 60秒以下、またはタイトルに #shorts を含む）を削除する。
@@ -513,6 +521,75 @@ impl Playlist {
         }
         self.refresh();
     }
+}
+
+/// 複数のプレイリスト間を比較し、2つ以上のリストにまたがって重複している動画（または指定リスト群全体の重複）を抽出する。
+/// 最初のプレイリスト（基準リスト）に存在する動画は保持（is_duplicate = false）、
+/// それ以降のプレイリストに存在する同一動画は重複（is_duplicate = true）としてマークする。
+pub fn find_cross_duplicates(playlists: &[&Playlist]) -> Vec<DuplicateGroup> {
+    if playlists.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut map: std::collections::HashMap<&str, Vec<(&Playlist, &PlaylistItem)>> = std::collections::HashMap::new();
+    for pl in playlists {
+        for it in &pl.items {
+            map.entry(it.video_id.as_str()).or_default().push((pl, it));
+        }
+    }
+
+    let mut groups = Vec::new();
+    let mut seen = HashSet::new();
+    let first_pid = &playlists[0].playlist_id;
+
+    for pl in playlists {
+        for it in &pl.items {
+            if seen.insert(it.video_id.as_str()) {
+                if let Some(list) = map.get(it.video_id.as_str()) {
+                    let mut unique_playlists = HashSet::new();
+                    for (p, _) in list {
+                        unique_playlists.insert(&p.playlist_id);
+                    }
+                    if unique_playlists.len() > 1 {
+                        let mut first_seen_in_ref = false;
+                        let items = list
+                            .iter()
+                            .map(|(p, item)| {
+                                let is_dupe = if p.playlist_id == *first_pid {
+                                    if !first_seen_in_ref {
+                                        first_seen_in_ref = true;
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                } else {
+                                    true
+                                };
+                                DuplicateItemInfo {
+                                    playlist_item_id: item.playlist_item_id.clone(),
+                                    playlist_id: p.playlist_id.clone(),
+                                    playlist_title: p.title.clone(),
+                                    position: item.current_position,
+                                    is_duplicate: is_dupe,
+                                }
+                            })
+                            .collect();
+
+                        groups.push(DuplicateGroup {
+                            video_id: it.video_id.clone(),
+                            title: it.title.clone(),
+                            thumbnail_url: it.thumbnail_url.clone(),
+                            channel: it.channel.clone(),
+                            playlist_id: pl.playlist_id.clone(),
+                            playlist_title: pl.title.clone(),
+                            items,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    groups
 }
 
 #[cfg(test)]
@@ -720,6 +797,48 @@ mod tests {
         assert_eq!(g.items[0].playlist_item_id, "i0");
         assert_eq!(g.items[1].playlist_item_id, "new-dupe0");
         assert_eq!(g.items[2].playlist_item_id, "new-dupe0-again");
+    }
+
+    #[test]
+    fn find_cross_duplicates_compares_playlists() {
+        let v = |id: &str| VideoInfo {
+            video_id: id.into(),
+            title: format!("Title_{id}"),
+            thumbnail_url: format!("thumb_{id}"),
+            channel: format!("Chan_{id}"),
+            ..Default::default()
+        };
+
+        let mut pl_a = Playlist::new_local("pl_a".into(), "List A".into());
+        pl_a.add_video(v("v1"), "a1".into(), None);
+        pl_a.add_video(v("v2"), "a2".into(), None);
+        pl_a.add_video(v("v3"), "a3".into(), None);
+
+        let mut pl_b = Playlist::new_local("pl_b".into(), "List B".into());
+        pl_b.add_video(v("v2"), "b1".into(), None); // dupe with A
+        pl_b.add_video(v("v4"), "b2".into(), None);
+        pl_b.add_video(v("v3"), "b3".into(), None); // dupe with A
+
+        let mut pl_c = Playlist::new_local("pl_c".into(), "List C".into());
+        pl_c.add_video(v("v5"), "c1".into(), None);
+
+        // Compare A and B
+        let dupes_ab = find_cross_duplicates(&[&pl_a, &pl_b]);
+        assert_eq!(dupes_ab.len(), 2); // v2 and v3
+        let g_v2 = dupes_ab.iter().find(|g| g.video_id == "v2").unwrap();
+        assert_eq!(g_v2.items.len(), 2);
+        assert_eq!(g_v2.items[0].playlist_id, "pl_a");
+        assert!(!g_v2.items[0].is_duplicate); // List A item is kept
+        assert_eq!(g_v2.items[1].playlist_id, "pl_b");
+        assert!(g_v2.items[1].is_duplicate); // List B item is marked dupe
+
+        // Compare A and C (no common videos)
+        let dupes_ac = find_cross_duplicates(&[&pl_a, &pl_c]);
+        assert_eq!(dupes_ac.len(), 0);
+
+        // Compare all three: A, B, C
+        let dupes_all = find_cross_duplicates(&[&pl_a, &pl_b, &pl_c]);
+        assert_eq!(dupes_all.len(), 2);
     }
 
     #[test]

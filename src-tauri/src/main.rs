@@ -851,6 +851,29 @@ async fn find_duplicates(app: App<'_>, playlist_id: Option<String>) -> Result<Ve
     Ok(groups)
 }
 
+/// 指定された複数のプレイリスト同士（または全プレイリスト間）を比較し、共通して含まれる重複動画を抽出する。
+/// playlist_ids が空の場合は全プレイリストを比較対象とする。
+#[tauri::command]
+async fn compare_duplicates(
+    app: App<'_>,
+    playlist_ids: Vec<String>,
+) -> Result<Vec<model::DuplicateGroup>, String> {
+    let g = app.lock().await;
+    let target_ids = if playlist_ids.is_empty() {
+        g.summaries.iter().map(|s| s.id.clone()).collect()
+    } else {
+        playlist_ids
+    };
+
+    let mut pls = Vec::new();
+    for pid in &target_ids {
+        if let Some(p) = g.playlists.get(pid) {
+            pls.push(p);
+        }
+    }
+    Ok(model::find_cross_duplicates(&pls))
+}
+
 /// 選択された重複動画を削除する。削除した合計件数を返す。
 #[tauri::command]
 async fn remove_selected_duplicates(
@@ -1431,6 +1454,7 @@ fn main() {
             reset,
             dedup_playlist,
             find_duplicates,
+            compare_duplicates,
             remove_selected_duplicates,
             remove_shorts,
             pending_count,
