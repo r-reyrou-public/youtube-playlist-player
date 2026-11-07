@@ -244,4 +244,13 @@ listen("playlist-changed", async (e) => {
   try { setState(await invoke("get_playlist", { playlistId })); } catch (_) {}
 });
 
+listen("playlist-id-changed", async (e) => {
+  const { oldId, newId } = e.payload;
+  if (playlistId === oldId) {
+    playlistId = newId;
+    history.replaceState(null, "", `editor.html?id=${encodeURIComponent(newId)}`);
+    try { setState(await invoke("get_playlist", { playlistId })); } catch (_) {}
+  }
+});
+
 window.focus();

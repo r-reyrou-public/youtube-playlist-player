@@ -19,6 +19,8 @@ struct Inner {
     client: Option<YouTube>,
     summaries: Vec<PlaylistSummary>,
     playlists: HashMap<String, Playlist>,
+    /// local-N から実際の YouTube プレイリストID へのエイリアス
+    id_aliases: HashMap<String, String>,
     /// 「公開リストを開く」で取得中の他人のリスト（コピー用）。
     peek: Option<Playlist>,
     /// ウィンドウ間ドラッグの移動元（playlist_id, 動画の playlist_item_id 複数）。
@@ -28,7 +30,48 @@ struct Inner {
 }
 
 impl Inner {
+    fn resolve_id<'a>(&'a self, id: &'a str) -> &'a str {
+        let mut cur = id;
+        while let Some(next) = self.id_aliases.get(cur) {
+            cur = next.as_str();
+        }
+        cur
+    }
+
+    fn cleanup_duplicate_summaries(&mut self) {
+        // 1. 各 playlist の remote_id と id の整合性をとる
+        let mut local_to_remote: Vec<(String, String)> = Vec::new();
+        for (id, pl) in &self.playlists {
+            if id.starts_with("local-") {
+                if let Some(rid) = &pl.remote_id {
+                    local_to_remote.push((id.clone(), rid.clone()));
+                }
+            }
+        }
+        for (local_id, remote_id) in local_to_remote {
+            self.id_aliases.insert(local_id.clone(), remote_id.clone());
+            if let Some(mut pl) = self.playlists.remove(&local_id) {
+                pl.playlist_id = remote_id.clone();
+                self.playlists.entry(remote_id.clone()).or_insert(pl);
+            }
+            let has_remote = self.summaries.iter().any(|s| s.id == remote_id);
+            if has_remote {
+                self.summaries.retain(|s| s.id != local_id);
+            } else if let Some(s) = self.summaries.iter_mut().find(|s| s.id == local_id) {
+                s.id = remote_id;
+                s.is_new = false;
+            }
+        }
+
+        // 2. summaries 内の重複 ID を除外（最初に見つかったものを保持）
+        let mut seen_ids = HashSet::new();
+        self.summaries.retain(|s| seen_ids.insert(s.id.clone()));
+    }
+
     fn upsert_summary(&mut self, s: PlaylistSummary) {
+        let id = self.resolve_id(&s.id).to_string();
+        let mut s = s;
+        s.id = id;
         match self.summaries.iter_mut().find(|x| x.id == s.id) {
             Some(x) => *x = s,
             None => self.summaries.push(s),
@@ -158,8 +201,10 @@ fn restore(g: &mut Inner, d: quota::Deferred) {
         g.upsert_summary(s);
     }
     for p in d.playlists {
-        g.playlists.insert(p.playlist_id.clone(), p);
+        let id = g.resolve_id(&p.playlist_id).to_string();
+        g.playlists.insert(id, p);
     }
+    g.cleanup_duplicate_summaries();
 }
 
 /// 自分のプレイリスト一覧を取得（playlists.list: 1ユニット/50件）。手動追加分は保持する。
@@ -169,11 +214,13 @@ async fn list_my_playlists(app: App<'_>, conn: State<'_, ConnectLock>, handle: A
     let mine = c.my_playlists().await?; // 通信中は共有状態をロックしない
     let mut g = app.lock().await;
     for s in mine {
-        if g.playlists.get(&s.id).is_some_and(|p| p.deleted) {
+        let rid = g.resolve_id(&s.id).to_string();
+        if g.playlists.get(&rid).is_some_and(|p| p.deleted) {
             continue; // 削除を Push するまで、一覧には出さない
         }
         g.upsert_summary(s);
     }
+    g.cleanup_duplicate_summaries();
     let out = g.list_summaries();
     drop(g);
     schedule_save(&handle);
@@ -593,6 +640,10 @@ async fn move_between(
 /// リストを開いた際に再生時間を取得し、ショート動画（60秒以下）は削除する。
 #[tauri::command]
 async fn get_playlist(app: App<'_>, conn: State<'_, ConnectLock>, handle: AppHandle, playlist_id: String) -> Result<Playlist, String> {
+    let playlist_id = {
+        let g = app.lock().await;
+        g.resolve_id(&playlist_id).to_string()
+    };
     let (cached, title) = {
         let g = app.lock().await;
         let title = g.summaries
@@ -681,7 +732,7 @@ async fn remove_shorts(
     let mut affected_ids = Vec::new();
 
     let target_ids: Vec<String> = match playlist_id {
-        Some(id) => vec![id],
+        Some(id) => vec![g.resolve_id(&id).to_string()],
         None => g.playlists.keys().cloned().collect(),
     };
 
@@ -717,6 +768,10 @@ async fn remove_shorts(
 /// YouTube から最新を取得し直す（手元の未反映の変更は破棄される）。手元だけの新規リストは対象外。
 #[tauri::command]
 async fn refresh_playlist(app: App<'_>, conn: State<'_, ConnectLock>, handle: AppHandle, playlist_id: String) -> Result<Playlist, String> {
+    let playlist_id = {
+        let g = app.lock().await;
+        g.resolve_id(&playlist_id).to_string()
+    };
     let (remote, title) = {
         let g = app.lock().await;
         let title = g.summaries.iter().find(|s| s.id == playlist_id).map(|s| s.title.clone()).unwrap_or_default();
@@ -740,13 +795,14 @@ async fn edit(
     op: impl FnOnce(&mut Playlist) -> Result<(), String>,
 ) -> Result<Playlist, String> {
     let mut g = app.lock().await;
+    let resolved = g.resolve_id(playlist_id).to_string();
     let p = g
         .playlists
-        .get_mut(playlist_id)
+        .get_mut(&resolved)
         .ok_or("プレイリストが読み込まれていません")?;
     op(p)?;
     let out = p.clone();
-    notify(handle, playlist_id);
+    notify(handle, &resolved);
     Ok(out)
 }
 
@@ -838,12 +894,14 @@ async fn find_duplicates(app: App<'_>, playlist_id: Option<String>) -> Result<Ve
     let g = app.lock().await;
     let mut groups = Vec::new();
     if let Some(pid) = playlist_id {
-        if let Some(p) = g.playlists.get(&pid) {
+        let rid = g.resolve_id(&pid);
+        if let Some(p) = g.playlists.get(rid) {
             groups.extend(p.find_duplicates());
         }
     } else {
         for s in &g.summaries {
-            if let Some(p) = g.playlists.get(&s.id) {
+            let rid = g.resolve_id(&s.id);
+            if let Some(p) = g.playlists.get(rid) {
                 groups.extend(p.find_duplicates());
             }
         }
@@ -859,10 +917,10 @@ async fn compare_duplicates(
     playlist_ids: Vec<String>,
 ) -> Result<Vec<model::DuplicateGroup>, String> {
     let g = app.lock().await;
-    let target_ids = if playlist_ids.is_empty() {
-        g.summaries.iter().map(|s| s.id.clone()).collect()
+    let target_ids: Vec<String> = if playlist_ids.is_empty() {
+        g.summaries.iter().map(|s| g.resolve_id(&s.id).to_string()).collect()
     } else {
-        playlist_ids
+        playlist_ids.iter().map(|id| g.resolve_id(id).to_string()).collect()
     };
 
     let mut pls = Vec::new();
@@ -900,7 +958,9 @@ async fn remove_selected_duplicates(
 
 #[tauri::command]
 async fn pending_count(app: App<'_>, playlist_id: String) -> Result<usize, String> {
-    Ok(app.lock().await.playlists.get(&playlist_id).map_or(0, |p| p.plan().len()))
+    let g = app.lock().await;
+    let rid = g.resolve_id(&playlist_id);
+    Ok(g.playlists.get(rid).map_or(0, |p| p.plan().len()))
 }
 
 #[derive(Serialize)]
@@ -1027,14 +1087,25 @@ async fn exec_op(client: &YouTube, op: &Op, remote: &Option<String>, title: &str
         },
         Op::Delete { item_id } => client.delete_item(item_id).await.map(|_| None),
         Op::Insert { video_id, position, .. } => match remote {
-            Some(rid) => match client.insert_item(rid, video_id, Some(*position)).await {
-                // 位置を受け付けないリスト（並び順が「手動」でない等）は、末尾に追加する
-                Err(e) if e.contains("400") => {
-                    *appended = true;
-                    client.insert_item(rid, video_id, None).await.map(Some)
+            Some(rid) => {
+                let mut retry = 0;
+                loop {
+                    match client.insert_item(rid, video_id, Some(*position)).await {
+                        // 位置を受け付けないリスト（並び順が「手動」でない等）は、末尾に追加する
+                        Err(e) if e.contains("400") => {
+                            *appended = true;
+                            break client.insert_item(rid, video_id, None).await.map(Some);
+                        }
+                        // 新規リスト作成直後のレプリケーション遅延対策（YouTube API の結果整合性により数秒間 404 が返る場合がある）
+                        Err(e) if e.contains("404") && retry < 3 => {
+                            retry += 1;
+                            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                            continue;
+                        }
+                        r => break r.map(Some),
+                    }
                 }
-                r => r.map(Some),
-            },
+            }
             None => Err(NOT_CREATED.into()),
         },
         Op::Move { item_id, video_id, position } => match remote {
@@ -1075,7 +1146,6 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
     let client = client(&app, &conn).await?;
     progress.1 = pending_lists(&*app.lock().await, ids).iter().map(|p| p.count).sum();
     let mut touched: Vec<String> = Vec::new();
-    let mut recreated: Vec<String> = Vec::new();
     let mut synced: Vec<String> = Vec::new();
     let outcome = loop {
         if ctl.cancel.load(Ordering::SeqCst) {
@@ -1088,7 +1158,7 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
                 Some((pl.id, p.plan().into_iter().next()?, p.remote_id.clone(), p.title.clone()))
             })
         };
-        let Some((pid, op, remote, title)) = next else { break Ok("done") };
+        let Some((mut pid, op, remote, title)) = next else { break Ok("done") };
         if mode != "now" && quota::remaining() < quota::OP_COST {
             if mode == "defer" {
                 break Ok("deferred");
@@ -1127,6 +1197,33 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
                 if op == Op::DeletePlaylist {
                     g.playlists.remove(&pid);
                     g.summaries.retain(|s| s.id != pid);
+                } else if op == Op::CreatePlaylist {
+                    if let Some(new_rid) = result_id {
+                        // 新しい YouTube プレイリストID に昇格（二重リスト生成を防止）
+                        if let Some(mut p) = g.playlists.remove(&pid) {
+                            p.playlist_id = new_rid.clone();
+                            p.remote_id = Some(new_rid.clone());
+                            p.refresh();
+                            g.playlists.insert(new_rid.clone(), p);
+                        }
+                        if let Some(s) = g.summaries.iter_mut().find(|s| s.id == pid) {
+                            s.id = new_rid.clone();
+                            s.is_new = false;
+                        }
+                        g.id_aliases.insert(pid.clone(), new_rid.clone());
+
+                        if let Some(pos) = touched.iter().position(|x| x == &pid) {
+                            touched[pos] = new_rid.clone();
+                        } else {
+                            touched.push(new_rid.clone());
+                        }
+
+                        let _ = handle.emit("playlist-id-changed", serde_json::json!({
+                            "oldId": pid,
+                            "newId": new_rid,
+                        }));
+                        pid = new_rid;
+                    }
                 } else if let Some(p) = g.playlists.get_mut(&pid) {
                     p.apply(&op, result_id);
                 }
@@ -1137,14 +1234,6 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
                 emit_progress(handle, "running", progress.0, progress.1, String::new(), 0);
             }
             Err(e) if quota::is_quota_error(&e) && mode != "now" => quota::mark_exhausted(),
-            // このアプリで作ったリストが YouTube に見つからない（削除された等）: 1回だけ作り直す
-            Err(e) if e.contains("404") && matches!(op, Op::Insert { .. } | Op::Move { .. }) && pid.starts_with("local-") && !recreated.contains(&pid) => {
-                recreated.push(pid.clone());
-                if let Some(p) = app.lock().await.playlists.get_mut(&pid) {
-                    p.forget_remote();
-                }
-                progress.1 = pending_lists(&*app.lock().await, ids).iter().map(|p| p.count).sum::<usize>() + progress.0;
-            }
             // 他人の公開リストなど、YouTube 上で削除権限のないリストを一覧から削除した場合は、手元から破棄して完了扱いにする
             Err(e) if op == Op::DeletePlaylist && e.contains("403") => {
                 let mut g = app.lock().await;
@@ -1158,6 +1247,8 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
                     "\n\n【原因】このプレイリスト（または動画）の編集権限がありません（他人が作成した公開リストなど）。\nYouTube 側を変更できないため、ツリーで対象リストを右クリックして「YouTubeから最新を取得」を押して手元の未反映の変更を破棄するか、「一覧から削除」してください。"
                 } else if e.contains("400") && matches!(op, Op::Insert { .. } | Op::Move { .. }) {
                     "\nこのリストの並び順が「手動」になっていない可能性があります。YouTube でリストの並び順を「手動」にしてからやり直してください"
+                } else if e.contains("404") && matches!(op, Op::Insert { .. }) {
+                    "\n【原因】追加しようとした動画が YouTube 上で削除または非公開になっている可能性があります。"
                 } else {
                     ""
                 };
@@ -1525,5 +1616,39 @@ mod tests {
         inner.move_summary("A", None, None);
         let ids: Vec<&str> = inner.summaries.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["C", "B", "D", "A"]);
+    }
+
+    #[test]
+    fn test_cleanup_duplicate_summaries_promotes_local_and_removes_duplicate() {
+        let mut inner = Inner::default();
+        let mut local_pl = Playlist::new_local("local-1".into(), "My List".into());
+        local_pl.remote_id = Some("PL_remote123".into());
+        inner.playlists.insert("local-1".into(), local_pl);
+
+        let mut s_local = make_summary("local-1");
+        s_local.is_new = true;
+        inner.summaries.push(s_local);
+
+        let s_remote = make_summary("PL_remote123");
+        inner.summaries.push(s_remote);
+
+        assert_eq!(inner.summaries.len(), 2);
+        inner.cleanup_duplicate_summaries();
+
+        // local-1 が PL_remote123 に統合され、重複が解消されて1件になる
+        assert_eq!(inner.summaries.len(), 1);
+        assert_eq!(inner.summaries[0].id, "PL_remote123");
+        assert!(!inner.summaries[0].is_new);
+        assert_eq!(inner.playlists.get("PL_remote123").unwrap().playlist_id, "PL_remote123");
+        assert_eq!(inner.resolve_id("local-1"), "PL_remote123");
+    }
+
+    #[test]
+    fn test_resolve_id_chain() {
+        let mut inner = Inner::default();
+        inner.id_aliases.insert("local-1".into(), "temp-1".into());
+        inner.id_aliases.insert("temp-1".into(), "PL_final".into());
+        assert_eq!(inner.resolve_id("local-1"), "PL_final");
+        assert_eq!(inner.resolve_id("PL_final"), "PL_final");
     }
 }

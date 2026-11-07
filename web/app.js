@@ -530,6 +530,24 @@ listen("playlist-changed", async (e) => {
   refreshPush();
 });
 
+listen("playlist-id-changed", async (e) => {
+  const { oldId, newId } = e.payload;
+  if (cache[oldId]) {
+    cache[newId] = cache[oldId];
+    cache[newId].playlist_id = newId;
+    delete cache[oldId];
+  }
+  if (expanded.has(oldId)) {
+    expanded.delete(oldId);
+    expanded.add(newId);
+  }
+  try {
+    summaries = await invoke("list_summaries");
+  } catch (_) {}
+  renderTree();
+  refreshPush();
+});
+
 // 左ペイン最上部: 新規リスト（手元に作る。YouTube への作成は Push）
 $("newListBtn").onclick = async () => {
   const name = await Common.askText("新規リスト", "リスト名");

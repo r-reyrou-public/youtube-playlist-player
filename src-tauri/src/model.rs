@@ -216,7 +216,7 @@ impl Playlist {
     }
 
     /// 現在位置・サーバー上の位置・新規フラグを再計算する。
-    fn refresh(&mut self) {
+    pub fn refresh(&mut self) {
         let server = &self.server;
         for (idx, item) in self.items.iter_mut().enumerate() {
             item.current_position = idx;
