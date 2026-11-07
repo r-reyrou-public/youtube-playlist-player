@@ -165,11 +165,12 @@ function renderTree() {
       dragList = null;
       document.querySelectorAll(".dropTarget, .dropBefore, .dropAfter").forEach((el) => el.classList.remove("dropTarget", "dropBefore", "dropAfter"));
     });
-    // 行の上端・下端にドロップすると並び順の変更、中央にドロップすると取り込み（コピー）
+    // 行の上半分・下半分にドロップすると並び順の変更、中央にドロップすると取り込み（コピー）
+    // 一番上や一番下への移動がスムーズに行えるよう、before/after の判定範囲を広げる
     const zone = (e) => {
       const r = head.getBoundingClientRect();
       const y = (e.clientY - r.top) / r.height;
-      return y < 0.28 ? "before" : y > 0.72 ? "after" : "import";
+      return y < 0.38 ? "before" : y > 0.62 ? "after" : "import";
     };
     const clearDrop = () => head.classList.remove("dropTarget", "dropBefore", "dropAfter");
     head.addEventListener("dragover", (e) => {
@@ -183,6 +184,7 @@ function renderTree() {
     head.addEventListener("dragleave", clearDrop);
     head.addEventListener("drop", async (e) => {
       e.preventDefault();
+      e.stopPropagation();
       const z = zone(e);
       clearDrop();
       const from = summaries.find((x) => x.id === dragList);
@@ -202,6 +204,28 @@ function renderTree() {
     if (expanded.has(s.id)) li.appendChild(renderChildren(s.id));
     ul.appendChild(li);
   }
+
+  // ツリー下部の余白エリアへのドロップで一番下（末尾）へ移動
+  ul.addEventListener("dragover", (e) => {
+    if (dragList) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+    }
+  });
+  ul.addEventListener("drop", async (e) => {
+    if (!dragList) return;
+    if (!e.target.closest("li")) {
+      e.preventDefault();
+      const fromId = dragList;
+      dragList = null;
+      document.querySelectorAll(".dropTarget, .dropBefore, .dropAfter").forEach((el) => el.classList.remove("dropTarget", "dropBefore", "dropAfter"));
+      const last = summaries[summaries.length - 1];
+      if (last && last.id !== fromId) {
+        await moveList(fromId, last.id, "after");
+      }
+    }
+  });
+
   if (treePane) treePane.scrollTop = prevScroll;
   updatePlayIcons();
 }
@@ -339,22 +363,45 @@ function renderChildren(id) {
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData("text/plain", String(idx));
     });
+    li.addEventListener("dragend", () => {
+      drag = null;
+      document.querySelectorAll(".drop-before, .drop-after, .dragover").forEach((el) => el.classList.remove("drop-before", "drop-after", "dragover"));
+    });
     li.addEventListener("dragover", (e) => {
       if (drag && drag.id === id) {
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
-        li.classList.add("dragover");
+        const r = li.getBoundingClientRect();
+        const isAfter = (e.clientY - r.top) > (r.height / 2);
+        li.classList.toggle("drop-before", !isAfter);
+        li.classList.toggle("drop-after", isAfter);
       }
     });
-    li.addEventListener("dragleave", () => li.classList.remove("dragover"));
+    li.addEventListener("dragleave", () => {
+      li.classList.remove("drop-before", "drop-after", "dragover");
+    });
     li.addEventListener("drop", async (e) => {
       e.preventDefault();
       e.stopPropagation();
       const from = drag;
       drag = null;
-      document.querySelectorAll(".dragover").forEach((el) => el.classList.remove("dragover"));
-      if (!from || from.id !== id || from.idx === idx) { return; }
-      const s = await call("move_item", { playlistId: id, fromIndex: from.idx, toIndex: idx });
+      const r = li.getBoundingClientRect();
+      const isAfter = (e.clientY - r.top) > (r.height / 2);
+      document.querySelectorAll(".drop-before, .drop-after, .dragover").forEach((el) => el.classList.remove("drop-before", "drop-after", "dragover"));
+      if (!from || from.id !== id) { return; }
+
+      const items = cache[id] ? cache[id].items : [];
+      const maxIdx = items.length > 0 ? items.length - 1 : 0;
+      let targetIdx = idx;
+      if (isAfter) {
+        targetIdx = (from.idx < idx) ? idx : idx + 1;
+      } else {
+        targetIdx = (from.idx < idx) ? idx - 1 : idx;
+      }
+      targetIdx = Math.max(0, Math.min(targetIdx, maxIdx));
+
+      if (from.idx === targetIdx) { return; }
+      const s = await call("move_item", { playlistId: id, fromIndex: from.idx, toIndex: targetIdx });
       if (s) {
         cache[id] = s;
         renderTree();
@@ -363,6 +410,35 @@ function renderChildren(id) {
     });
     ul.appendChild(li);
   });
+
+  // 動画リスト下部の余白エリアへのドロップで一番下（末尾）へ移動
+  ul.addEventListener("dragover", (e) => {
+    if (drag && drag.id === id) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+    }
+  });
+  ul.addEventListener("drop", async (e) => {
+    if (!drag || drag.id !== id) return;
+    if (!e.target.closest("li")) {
+      e.preventDefault();
+      e.stopPropagation();
+      const from = drag;
+      drag = null;
+      document.querySelectorAll(".drop-before, .drop-after, .dragover").forEach((el) => el.classList.remove("drop-before", "drop-after", "dragover"));
+      const items = cache[id] ? cache[id].items : [];
+      if (!items.length) return;
+      const targetIdx = items.length - 1;
+      if (from.idx === targetIdx) return;
+      const s = await call("move_item", { playlistId: id, fromIndex: from.idx, toIndex: targetIdx });
+      if (s) {
+        cache[id] = s;
+        renderTree();
+        refreshPush();
+      }
+    }
+  });
+
   box.appendChild(ul);
   syncSel(ul, id);
   return box;

@@ -84,18 +84,26 @@ function acceptsDrag(e) {
 }
 
 // index の位置へドロップ。同じ画面内なら並べ替え、別ウィンドウからなら移動（元のリストからは取り除く）
-async function dropAt(e, index) {
+async function dropAt(e, index, isAfter = false) {
   e.preventDefault();
-  document.querySelectorAll(".dragover").forEach((el) => el.classList.remove("dragover"));
+  document.querySelectorAll(".dragover, .drop-before, .drop-after").forEach((el) => el.classList.remove("dragover", "drop-before", "drop-after"));
   if (dragFrom !== null) {
     const from = dragFrom;
     dragFrom = null;
-    const to = Math.min(index, state.items.length - 1);
-    if (from === to) return;
-    const s = await call("move_item", { fromIndex: from, toIndex: to });
+    let targetIdx = index;
+    if (isAfter) {
+      targetIdx = (from < index) ? index : index + 1;
+    } else {
+      targetIdx = (from < index) ? index - 1 : index;
+    }
+    const maxIdx = Math.max(0, state.items.length - 1);
+    targetIdx = Math.max(0, Math.min(targetIdx, maxIdx));
+    if (from === targetIdx) return;
+    const s = await call("move_item", { fromIndex: from, toIndex: targetIdx });
     if (s) setState(s);
   } else if (Array.from(e.dataTransfer.types).includes(CROSS_TYPE)) {
-    const s = await call("move_between", { toPlaylist: playlistId, toIndex: index }, true);
+    const to = isAfter ? index + 1 : index;
+    const s = await call("move_between", { toPlaylist: playlistId, toIndex: to }, true);
     if (s) setState(s);
   }
 }
@@ -103,7 +111,10 @@ async function dropAt(e, index) {
 // 一覧の余白（末尾）へのドロップ
 const listArea = $("editorMain");
 listArea.addEventListener("dragover", (e) => { if (acceptsDrag(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; } });
-listArea.addEventListener("drop", (e) => dropAt(e, state.items.length));
+listArea.addEventListener("drop", (e) => {
+  if (e.target.closest("li")) return;
+  dropAt(e, state.items.length - 1, true);
+});
 
 function syncSelAll() {
   const n = state.items.filter((it) => selected.has(it.playlist_item_id)).length;
@@ -173,14 +184,28 @@ function render() {
         : [it.playlist_item_id];
       invoke("drag_begin", { playlistId, itemIds: ids }).catch(() => {});
     });
+    li.addEventListener("dragend", () => {
+      dragFrom = null;
+      document.querySelectorAll(".dragover, .drop-before, .drop-after").forEach((el) => el.classList.remove("dragover", "drop-before", "drop-after"));
+    });
     li.addEventListener("dragover", (e) => {
       if (!acceptsDrag(e)) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
-      li.classList.add("dragover");
+      const r = li.getBoundingClientRect();
+      const isAfter = (e.clientY - r.top) > (r.height / 2);
+      li.classList.toggle("drop-before", !isAfter);
+      li.classList.toggle("drop-after", isAfter);
     });
-    li.addEventListener("dragleave", () => li.classList.remove("dragover"));
-    li.addEventListener("drop", (e) => { e.stopPropagation(); dropAt(e, idx); });
+    li.addEventListener("dragleave", () => {
+      li.classList.remove("dragover", "drop-before", "drop-after");
+    });
+    li.addEventListener("drop", (e) => {
+      e.stopPropagation();
+      const r = li.getBoundingClientRect();
+      const isAfter = (e.clientY - r.top) > (r.height / 2);
+      dropAt(e, idx, isAfter);
+    });
     ul.appendChild(li);
   });
 }
