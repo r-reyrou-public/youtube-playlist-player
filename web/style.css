@@ -278,17 +278,77 @@ dialog > input[type=text] { width: 100%; }
 .chRow .actions { display: flex; gap: 4px; flex-shrink: 0; }
 .chRow .actions button { padding: 2px 8px; font-size: 12px; }
 
-#dedupDlg { width: min(740px, 94vw); max-height: 85vh; }
-.dedupBar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #333; margin-bottom: 10px; font-size: 13px; }
-.dedupBar select { max-width: 220px; }
-.dedupModeControls { display: inline-flex; align-items: center; gap: 6px; }
+#dedupDlg { width: min(1040px, 96vw); max-height: 90vh; }
+.dlgHeaderBar { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 8px; margin-bottom: 10px; }
+.dlgHeaderBar h3 { margin: 0; font-size: 16px; }
+.dlgModeBar { font-size: 13px; color: #ccc; }
+.dlgModeBar select { background: #222; color: #eee; border: 1px solid #444; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
+
+.dedupBar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #2a2a2a; margin-bottom: 10px; font-size: 13px; }
+.dedupBar select { max-width: 260px; }
+.selLabel { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
+.dedupModeControls { display: inline-flex; align-items: center; gap: 8px; }
 .dedupNote { color: #aaa; font-size: 11px; }
 .dedupPlTag { background: #1e2638; color: #7db0ff; padding: 2px 7px; border-radius: 4px; font-size: 11px; border: 1px solid #32476d; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-#dedupSwapBtn { background: #333; border: 1px solid #555; padding: 2px 8px; border-radius: 4px; cursor: pointer; color: #eee; font-weight: bold; }
-#dedupSwapBtn:hover { background: #444; border-color: #888; }
-.dedupContainer { overflow-y: auto; display: flex; flex-direction: column; gap: 12px; min-height: 180px; max-height: 52vh; padding-right: 4px; }
+#dedupSwapBtn { background: #2c2c2c; border: 1px solid #555; padding: 4px 10px; border-radius: 4px; cursor: pointer; color: #eee; font-weight: bold; font-size: 12px; }
+#dedupSwapBtn:hover { background: #3d3d3d; border-color: #888; }
+
+/* 左右比較サマリーカード */
+.dedupCompareSummary { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: stretch; background: #181b22; border: 1px solid #2c3444; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+.compareCard { background: #1f2430; border: 1px solid #364156; border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.compareCard.cardA { border-top: 3px solid #3b82f6; }
+.compareCard.cardB { border-top: 3px solid #10b981; }
+.cardHeader { display: flex; align-items: center; gap: 8px; }
+.cardBadge { font-size: 11px; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
+.sideBadgeA { background: #1d4ed8; color: #fff; }
+.sideBadgeB { background: #047857; color: #fff; }
+.cardTitle { font-weight: bold; font-size: 13px; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.cardStats { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; color: #cbd5e1; }
+.cardStats strong { font-size: 14px; color: #fff; }
+.statDiff { font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: bold; }
+.badgeMore { background: #065f46; color: #6ee7b7; border: 1px solid #059669; }
+.badgeLess { background: #7c2d12; color: #fdba74; border: 1px solid #ea580c; }
+.badgeSame { background: #374151; color: #d1d5db; }
+.cardActions { display: flex; gap: 6px; margin-top: auto; }
+.smallActionBtn { background: #262f40; border: 1px solid #475569; color: #e2e8f0; font-size: 11px; padding: 3px 8px; border-radius: 4px; cursor: pointer; }
+.smallActionBtn:hover { background: #334155; border-color: #64748b; }
+.smallActionBtn.highlight { background: #1e3a8a; border-color: #3b82f6; color: #93c5fd; font-weight: bold; }
+.smallActionBtn.highlight:hover { background: #1d4ed8; color: #fff; }
+
+.compareCenter { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 0 8px; min-width: 140px; text-align: center; }
+.vsText { font-size: 15px; font-weight: 900; color: #64748b; letter-spacing: 2px; }
+.commonStats { font-size: 12px; color: #e2e8f0; }
+.commonStats strong { color: #f59e0b; font-size: 14px; }
+.quickActions { display: flex; flex-direction: column; gap: 4px; width: 100%; margin-top: 4px; }
+
+.dedupQuickBar { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 10px; color: #94a3b8; }
+.noteText { font-size: 11px; color: #94a3b8; }
+
+.dedupContainer { overflow-y: auto; display: flex; flex-direction: column; gap: 10px; min-height: 200px; max-height: 52vh; padding-right: 4px; }
+
+/* 左右対比グリッド行カード */
+.compareRow { display: flex; flex-direction: column; gap: 8px; background: #181a20; border: 1px solid #2d3342; border-radius: 6px; padding: 10px 12px; }
+.compareCommonHead { display: flex; gap: 10px; align-items: center; }
+.compareVideoMeta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.compareVideoTitle { font-weight: bold; font-size: 13px; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.compareVideoSub { display: flex; gap: 8px; align-items: center; font-size: 11px; color: #94a3b8; }
+
+.compareSidesGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.compareSideBox { background: #1f232d; border: 1px solid #333c4d; border-radius: 5px; padding: 8px 10px; display: flex; align-items: center; justify-content: space-between; transition: background 0.15s, border-color 0.15s; }
+.compareSideBox.sideA { border-left: 3px solid #3b82f6; }
+.compareSideBox.sideB { border-left: 3px solid #10b981; }
+.compareSideBox.checked { background: #351c1c; border-color: #882b2b; }
+.compareSideLabel { display: flex; align-items: center; gap: 8px; width: 100%; cursor: pointer; user-select: none; font-size: 12px; }
+.sideColTag { font-size: 10px; font-weight: bold; padding: 1px 6px; border-radius: 3px; }
+.tagA { background: #1d4ed8; color: #fff; }
+.tagB { background: #047857; color: #fff; }
+.sidePos { color: #94a3b8; font-variant-numeric: tabular-nums; font-size: 11px; }
+.sideActionHint { margin-left: auto; font-size: 11px; color: #f87171; font-weight: bold; }
+.sideActionHint.keep { color: #34d399; }
+
+/* 単一リスト/全体モード用グループ */
 .dedupGroup { display: flex; gap: 12px; background: #1c1c1c; border: 1px solid #333; border-radius: 6px; padding: 10px; align-items: flex-start; }
-.dedupThumb { width: 120px; aspect-ratio: 16/9; object-fit: cover; border-radius: 4px; background: #000; flex-shrink: 0; cursor: pointer; }
+.dedupThumb { width: 100px; aspect-ratio: 16/9; object-fit: cover; border-radius: 4px; background: #000; flex-shrink: 0; cursor: pointer; }
 .dedupThumb:hover { filter: brightness(1.2); }
 .dedupDetails { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .dedupTitle { font-weight: bold; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #eee; }

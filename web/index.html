@@ -76,36 +76,89 @@
   <div class="dlgBtns"><button id="helpClose">閉じる</button></div>
 </dialog>
 <dialog id="dedupDlg">
-  <h3>重複チェック・リスト比較</h3>
-  <div class="dedupBar">
-    <label>モード:
-      <select id="dedupMode">
-        <option value="single">リスト内の重複</option>
-        <option value="compare">2つのリストを比較</option>
-        <option value="all">全リスト横断で比較</option>
-      </select>
-    </label>
-    <div id="dedupSingleControls" class="dedupModeControls">
-      <label>対象: <select id="dedupTarget"></select></label>
+  <div class="dlgHeaderBar">
+    <h3>重複チェック・プレイリスト比較</h3>
+    <div class="dlgModeBar">
+      <label>モード:
+        <select id="dedupMode">
+          <option value="compare">2つのリストを比較（左右表示）</option>
+          <option value="single">リスト内の重複</option>
+          <option value="all">全リスト横断比較</option>
+        </select>
+      </label>
     </div>
-    <div id="dedupCompareControls" class="dedupModeControls" style="display:none;">
-      <label>基準A: <select id="dedupTargetA"></select></label>
-      <button id="dedupSwapBtn" title="基準リストAと比較対象リストBを入れ替えます">⇄</button>
-      <label>比較先B: <select id="dedupTargetB"></select></label>
+  </div>
+  <div class="dedupBar">
+    <div id="dedupCompareControls" class="dedupModeControls">
+      <label class="selLabel">リスト A: <select id="dedupTargetA"></select></label>
+      <button id="dedupSwapBtn" title="基準リストAと比較先リストBを入れ替えます">⇄ 入替</button>
+      <label class="selLabel">リスト B: <select id="dedupTargetB"></select></label>
+    </div>
+    <div id="dedupSingleControls" class="dedupModeControls" style="display:none;">
+      <label>対象リスト: <select id="dedupTarget"></select></label>
     </div>
     <div id="dedupAllControls" class="dedupModeControls" style="display:none;">
       <span class="dedupNote">すべてのプレイリスト間の共通動画を検出</span>
     </div>
     <button id="dedupScanBtn">再チェック</button>
-    <span class="sepv"></span>
+    <span class="grow"></span>
+    <span id="dedupSummaryText" class="pkVideo"></span>
+  </div>
+
+  <!-- どちらが多いか数値で分かる比較サマリーカード（compareモード時） -->
+  <div id="dedupCompareSummary" class="dedupCompareSummary" style="display:none;">
+    <div class="compareCard cardA">
+      <div class="cardHeader">
+        <span class="cardBadge sideBadgeA">リスト A</span>
+        <span class="cardTitle" id="cardTitleA">-</span>
+      </div>
+      <div class="cardStats">
+        <div class="statItem">総曲数: <strong id="cardTotalA">0</strong> 本</div>
+        <div class="statItem">重複曲: <strong id="cardDupeA">0</strong> 本</div>
+        <div class="statDiff" id="cardDiffA"></div>
+      </div>
+      <div class="cardActions">
+        <button id="checkSideA" class="smallActionBtn">リストA側を全チェック</button>
+        <button id="uncheckSideA" class="smallActionBtn">解除</button>
+      </div>
+    </div>
+
+    <div class="compareCenter">
+      <div class="vsText">VS</div>
+      <div class="commonStats" id="commonStatsText">共通重複: <strong>0</strong> 本</div>
+      <div class="quickActions">
+        <button id="keepMoreBtn" class="smallActionBtn highlight" title="曲数が多い方のリストを残し、少ない方の重複をチェックします">多い方を残す（少ない側をチェック）</button>
+        <button id="keepLessBtn" class="smallActionBtn" title="曲数が少ない方のリストを残し、多い方の重複をチェックします">少ない方を残す（多い側をチェック）</button>
+      </div>
+    </div>
+
+    <div class="compareCard cardB">
+      <div class="cardHeader">
+        <span class="cardBadge sideBadgeB">リスト B</span>
+        <span class="cardTitle" id="cardTitleB">-</span>
+      </div>
+      <div class="cardStats">
+        <div class="statItem">総曲数: <strong id="cardTotalB">0</strong> 本</div>
+        <div class="statItem">重複曲: <strong id="cardDupeB">0</strong> 本</div>
+        <div class="statDiff" id="cardDiffB"></div>
+      </div>
+      <div class="cardActions">
+        <button id="checkSideB" class="smallActionBtn">リストB側を全チェック</button>
+        <button id="uncheckSideB" class="smallActionBtn">解除</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="dedupQuickBar">
     <button id="dedupSelDupes" title="重複動画（比較先リスト側や2件目以降）にチェックを入れます">重複分のみ選択</button>
     <button id="dedupSelAll" title="すべてのアイテムを選択します">全選択</button>
     <button id="dedupSelClear" title="すべての選択を解除します">全解除</button>
     <span class="grow"></span>
-    <span id="dedupSummaryText" class="pkVideo"></span>
+    <span class="noteText">※ チェックを入れた動画がリストから削除されます</span>
   </div>
+
   <div id="dedupList" class="dedupContainer"></div>
-  <p class="note">※ チェックを入れた動画がプレイリストから外されます（YouTube への反映はメイン画面の「Push」で行われます）。</p>
+
   <div class="dlgBtns">
     <button id="dedupDeleteBtn" class="danger" disabled>選択した動画を削除 (0件)</button>
     <button id="dedupCloseBtn">閉じる</button>
@@ -132,6 +185,7 @@
         <button id="copyBtn" title="公開リストの URL を開き、動画を選んで（全選択可）自分のリストへコピーする">公開リストを開く</button>
         <button id="channelBtn" title="チャンネルURLまたは@ハンドル名から、公開再生リスト一覧を取得します">チャンネルのリスト</button>
         <button id="myBtn">マイリスト取得</button>
+        <button id="topDedupBtn" title="プレイリスト間の重複比較・重複チェックを開きます">重複チェック</button>
         <button id="pushBtn" class="danger" title="手元の変更をYouTubeへ反映します">Push (0)</button>
         <div id="menuWrap">
           <button id="menuBtn" aria-label="メニュー" title="メニュー">☰</button>

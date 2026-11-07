@@ -935,10 +935,10 @@ document.querySelectorAll("a[data-url]").forEach((a) =>
 
 const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-// ---- 重複チェック（ハンバーガーメニュー内） ----
+// ---- 重複チェック（ハンバーガーメニュー・トップバー内） ----
 let dedupGroups = [];
 
-async function openDedupModal(initialMode = "single", initialA = null, initialB = null) {
+async function openDedupModal(initialMode = "compare", initialA = null, initialB = null) {
   const dlg = $("dedupDlg");
   const modeSel = $("dedupMode");
   const singleControls = $("dedupSingleControls");
@@ -953,6 +953,7 @@ async function openDedupModal(initialMode = "single", initialA = null, initialB 
   const listEl = $("dedupList");
   const summaryText = $("dedupSummaryText");
   const delBtn = $("dedupDeleteBtn");
+  const compareSummary = $("dedupCompareSummary");
 
   function populateSelect(sel, includeAll = false) {
     sel.innerHTML = "";
@@ -1019,11 +1020,84 @@ async function openDedupModal(initialMode = "single", initialA = null, initialB 
     return listEl.querySelectorAll("input.dedupCb:checked").length;
   }
 
+  function updateSideBoxStyle(cb) {
+    const box = cb.closest(".compareSideBox");
+    if (box) {
+      box.classList.toggle("checked", cb.checked);
+      const hint = box.querySelector(".sideActionHint");
+      if (hint) {
+        hint.textContent = cb.checked ? "削除対象" : "保持";
+        hint.classList.toggle("keep", !cb.checked);
+      }
+    }
+  }
+
   function updateCount() {
     const n = getCheckedCount();
     delBtn.disabled = (n === 0);
     delBtn.textContent = `選択した動画を削除 (${n}件)`;
+    listEl.querySelectorAll("input.dedupCb").forEach((cb) => {
+      updateSideBoxStyle(cb);
+    });
   }
+
+  // クイック選択・サマリーカードのボタン動作
+  $("checkSideA").onclick = () => {
+    listEl.querySelectorAll('input.dedupCb[data-side="A"]').forEach((cb) => { cb.checked = true; });
+    updateCount();
+  };
+  $("uncheckSideA").onclick = () => {
+    listEl.querySelectorAll('input.dedupCb[data-side="A"]').forEach((cb) => { cb.checked = false; });
+    updateCount();
+  };
+  $("checkSideB").onclick = () => {
+    listEl.querySelectorAll('input.dedupCb[data-side="B"]').forEach((cb) => { cb.checked = true; });
+    updateCount();
+  };
+  $("uncheckSideB").onclick = () => {
+    listEl.querySelectorAll('input.dedupCb[data-side="B"]').forEach((cb) => { cb.checked = false; });
+    updateCount();
+  };
+
+  $("keepMoreBtn").onclick = () => {
+    const a = targetSelA.value;
+    const b = targetSelB.value;
+    const sumA = summaries.find((s) => s.id === a);
+    const sumB = summaries.find((s) => s.id === b);
+    const countA = sumA ? sumA.item_count : 0;
+    const countB = sumB ? sumB.item_count : 0;
+    // 多い方を残す（少ない側をチェック）
+    if (countA >= countB) {
+      // Aを残す -> Bをチェック
+      listEl.querySelectorAll('input.dedupCb[data-side="A"]').forEach((cb) => { cb.checked = false; });
+      listEl.querySelectorAll('input.dedupCb[data-side="B"]').forEach((cb) => { cb.checked = true; });
+    } else {
+      // Bを残す -> Aをチェック
+      listEl.querySelectorAll('input.dedupCb[data-side="A"]').forEach((cb) => { cb.checked = true; });
+      listEl.querySelectorAll('input.dedupCb[data-side="B"]').forEach((cb) => { cb.checked = false; });
+    }
+    updateCount();
+  };
+
+  $("keepLessBtn").onclick = () => {
+    const a = targetSelA.value;
+    const b = targetSelB.value;
+    const sumA = summaries.find((s) => s.id === a);
+    const sumB = summaries.find((s) => s.id === b);
+    const countA = sumA ? sumA.item_count : 0;
+    const countB = sumB ? sumB.item_count : 0;
+    // 少ない方を残す（多い側をチェック）
+    if (countA >= countB) {
+      // Aをチェック -> Bを残す
+      listEl.querySelectorAll('input.dedupCb[data-side="A"]').forEach((cb) => { cb.checked = true; });
+      listEl.querySelectorAll('input.dedupCb[data-side="B"]').forEach((cb) => { cb.checked = false; });
+    } else {
+      // Bをチェック -> Aを残す
+      listEl.querySelectorAll('input.dedupCb[data-side="A"]').forEach((cb) => { cb.checked = false; });
+      listEl.querySelectorAll('input.dedupCb[data-side="B"]').forEach((cb) => { cb.checked = true; });
+    }
+    updateCount();
+  };
 
   async function ensurePlaylistLoaded(pid) {
     if (!pid) return;
@@ -1037,6 +1111,7 @@ async function openDedupModal(initialMode = "single", initialA = null, initialB 
     delBtn.disabled = true;
     delBtn.textContent = "選択した動画を削除 (0件)";
     summaryText.textContent = "検索中...";
+    if (compareSummary) compareSummary.style.display = "none";
 
     const m = modeSel.value;
     let dedupGroups = [];
@@ -1079,89 +1154,214 @@ async function openDedupModal(initialMode = "single", initialA = null, initialB 
       return;
     }
 
+    // 左右比較（compare）モードの場合、サマリーカードを計算・表示
+    if (m === "compare") {
+      const a = targetSelA.value;
+      const b = targetSelB.value;
+      const sumA = summaries.find((s) => s.id === a);
+      const sumB = summaries.find((s) => s.id === b);
+      const countA = sumA ? sumA.item_count : 0;
+      const countB = sumB ? sumB.item_count : 0;
+      const titleA = sumA ? sumA.title : "リスト A";
+      const titleB = sumB ? sumB.title : "リスト B";
+
+      $("cardTitleA").textContent = titleA;
+      $("cardTitleA").title = titleA;
+      $("cardTotalA").textContent = countA;
+      $("cardDupeA").textContent = dedupGroups.length;
+
+      $("cardTitleB").textContent = titleB;
+      $("cardTitleB").title = titleB;
+      $("cardTotalB").textContent = countB;
+      $("cardDupeB").textContent = dedupGroups.length;
+
+      const diff = countA - countB;
+      const diffA = $("cardDiffA");
+      const diffB = $("cardDiffB");
+
+      if (diff > 0) {
+        diffA.innerHTML = `<span class="statDiff badgeMore">★ ${diff}本 多い (+${diff})</span>`;
+        diffB.innerHTML = `<span class="statDiff badgeLess">${diff}本 少ない (-${diff})</span>`;
+      } else if (diff < 0) {
+        const absDiff = Math.abs(diff);
+        diffA.innerHTML = `<span class="statDiff badgeLess">${absDiff}本 少ない (-${absDiff})</span>`;
+        diffB.innerHTML = `<span class="statDiff badgeMore">★ ${absDiff}本 多い (+${absDiff})</span>`;
+      } else {
+        diffA.innerHTML = `<span class="statDiff badgeSame">同数 (${countA}本)</span>`;
+        diffB.innerHTML = `<span class="statDiff badgeSame">同数 (${countB}本)</span>`;
+      }
+
+      $("commonStatsText").innerHTML = `共通重複: <strong>${dedupGroups.length}</strong> 本`;
+      if (compareSummary) compareSummary.style.display = "grid";
+    }
+
     let totalDupeItems = 0;
     for (const g of dedupGroups) {
-      totalDupeItems += g.items.filter(it => it.is_duplicate).length;
+      totalDupeItems += g.items.filter((it) => it.is_duplicate).length;
     }
     const modeLabel = (m === "compare") ? "共通動画" : "重複";
     summaryText.textContent = `${dedupGroups.length} 本の${modeLabel} (削除対象候補: ${totalDupeItems}件)`;
 
-    for (const g of dedupGroups) {
-      const gBox = document.createElement("div");
-      gBox.className = "dedupGroup";
+    // リスト描画
+    if (m === "compare") {
+      const a = targetSelA.value;
+      const b = targetSelB.value;
+      const sumA = summaries.find((s) => s.id === a);
+      const sumB = summaries.find((s) => s.id === b);
+      const titleA = sumA ? sumA.title : "リストA";
+      const titleB = sumB ? sumB.title : "リストB";
 
-      const thumb = document.createElement("img");
-      thumb.className = "dedupThumb";
-      thumb.src = g.thumbnail_url || "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>";
-      thumb.title = "クリックで再生";
-      thumb.onclick = () => { playVideo(g.playlist_id, g.video_id); };
+      for (const g of dedupGroups) {
+        const itemA = g.items.find((it) => (it.playlist_id || g.playlist_id) === a);
+        const itemB = g.items.find((it) => (it.playlist_id || g.playlist_id) === b);
 
-      const details = document.createElement("div");
-      details.className = "dedupDetails";
+        const row = document.createElement("div");
+        row.className = "compareRow";
 
-      const titleDiv = document.createElement("div");
-      titleDiv.className = "dedupTitle";
-      titleDiv.textContent = g.title;
-      titleDiv.title = g.title;
+        // 上段: 動画共通情報
+        const head = document.createElement("div");
+        head.className = "compareCommonHead";
 
-      const metaDiv = document.createElement("div");
-      metaDiv.className = "dedupMeta";
-      metaDiv.innerHTML = `
-        <span class="dedupChannel">${escapeHtml(g.channel || "")}</span>
-        <span class="badge dupe">${g.items.length} 箇所に存在</span>
-        <button class="dedupPlayBtn">▶ 再生</button>
-      `;
-      metaDiv.querySelector(".dedupPlayBtn").onclick = () => { playVideo(g.playlist_id, g.video_id); };
+        const thumb = document.createElement("img");
+        thumb.className = "dedupThumb";
+        thumb.src = g.thumbnail_url || "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>";
+        thumb.title = "クリックで再生";
+        thumb.onclick = () => { playVideo(g.playlist_id, g.video_id); };
 
-      const itemsDiv = document.createElement("div");
-      itemsDiv.className = "dedupItems";
+        const meta = document.createElement("div");
+        meta.className = "compareVideoMeta";
+        meta.innerHTML = `
+          <div class="compareVideoTitle" title="${escapeHtml(g.title)}">${escapeHtml(g.title)}</div>
+          <div class="compareVideoSub">
+            <span>${escapeHtml(g.channel || "")}</span>
+            <button class="dedupPlayBtn">▶ 再生</button>
+          </div>
+        `;
+        meta.querySelector(".dedupPlayBtn").onclick = () => { playVideo(g.playlist_id, g.video_id); };
 
-      for (const it of g.items) {
-        const lbl = document.createElement("label");
-        lbl.className = `dedupItemLabel ${it.is_duplicate ? "isDupe" : "isOrig"}`;
+        head.append(thumb, meta);
 
-        const cb = document.createElement("input");
-        cb.type = "checkbox";
-        cb.className = "dedupCb";
-        cb.dataset.pid = it.playlist_id || g.playlist_id;
-        cb.dataset.id = it.playlist_item_id;
-        cb.dataset.isDupe = it.is_duplicate ? "1" : "0";
-        cb.checked = it.is_duplicate;
-        cb.onchange = updateCount;
+        // 下段: 左右2分割グリッド
+        const sidesGrid = document.createElement("div");
+        sidesGrid.className = "compareSidesGrid";
 
-        const plTag = document.createElement("span");
-        plTag.className = "dedupPlTag";
-        plTag.textContent = it.playlist_title || g.playlist_title || "リスト";
-        plTag.title = it.playlist_title || g.playlist_title || "";
-
-        const badge = document.createElement("span");
-        badge.className = `badge ${it.is_duplicate ? "badgeDupe" : "badgeOrig"}`;
-        if (m === "compare") {
-          badge.textContent = it.is_duplicate ? "重複 (削除対象)" : "基準A (保持)";
-        } else if (m === "all") {
-          badge.textContent = it.is_duplicate ? "重複" : "1件目 (保持)";
+        // 左: リストA側
+        const boxA = document.createElement("div");
+        boxA.className = "compareSideBox sideA";
+        if (itemA) {
+          const isDupe = itemA.is_duplicate;
+          boxA.innerHTML = `
+            <label class="compareSideLabel">
+              <input type="checkbox" class="dedupCb" data-side="A" data-pid="${escapeHtml(itemA.playlist_id || a)}" data-id="${escapeHtml(itemA.playlist_item_id)}" ${isDupe ? "checked" : ""}>
+              <span class="sideColTag tagA">リスト A</span>
+              <span class="sidePos">位置 #${itemA.position + 1}</span>
+              <span class="sideActionHint ${isDupe ? "" : "keep"}">${isDupe ? "削除対象" : "保持"}</span>
+            </label>
+          `;
+          boxA.classList.toggle("checked", isDupe);
+          const cbA = boxA.querySelector("input.dedupCb");
+          cbA.onchange = updateCount;
         } else {
-          badge.textContent = it.is_duplicate ? "重複" : "1件目 (保持)";
+          boxA.innerHTML = '<span class="noteText">リストAに存在しません</span>';
         }
 
-        const pos = document.createElement("span");
-        pos.className = "dedupPos";
-        pos.textContent = `位置 #${it.position + 1}`;
+        // 右: リストB側
+        const boxB = document.createElement("div");
+        boxB.className = "compareSideBox sideB";
+        if (itemB) {
+          const isDupe = itemB.is_duplicate;
+          boxB.innerHTML = `
+            <label class="compareSideLabel">
+              <input type="checkbox" class="dedupCb" data-side="B" data-pid="${escapeHtml(itemB.playlist_id || b)}" data-id="${escapeHtml(itemB.playlist_item_id)}" ${isDupe ? "checked" : ""}>
+              <span class="sideColTag tagB">リスト B</span>
+              <span class="sidePos">位置 #${itemB.position + 1}</span>
+              <span class="sideActionHint ${isDupe ? "" : "keep"}">${isDupe ? "削除対象" : "保持"}</span>
+            </label>
+          `;
+          boxB.classList.toggle("checked", isDupe);
+          const cbB = boxB.querySelector("input.dedupCb");
+          cbB.onchange = updateCount;
+        } else {
+          boxB.innerHTML = '<span class="noteText">リストBに存在しません</span>';
+        }
 
-        lbl.append(cb, plTag, badge, pos);
-        itemsDiv.appendChild(lbl);
+        sidesGrid.append(boxA, boxB);
+        row.append(head, sidesGrid);
+        listEl.appendChild(row);
       }
+    } else {
+      // 単一リストまたは全体モード用
+      for (const g of dedupGroups) {
+        const gBox = document.createElement("div");
+        gBox.className = "dedupGroup";
 
-      details.append(titleDiv, metaDiv, itemsDiv);
-      gBox.append(thumb, details);
-      listEl.appendChild(gBox);
+        const thumb = document.createElement("img");
+        thumb.className = "dedupThumb";
+        thumb.src = g.thumbnail_url || "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>";
+        thumb.title = "クリックで再生";
+        thumb.onclick = () => { playVideo(g.playlist_id, g.video_id); };
+
+        const details = document.createElement("div");
+        details.className = "dedupDetails";
+
+        const titleDiv = document.createElement("div");
+        titleDiv.className = "dedupTitle";
+        titleDiv.textContent = g.title;
+        titleDiv.title = g.title;
+
+        const metaDiv = document.createElement("div");
+        metaDiv.className = "dedupMeta";
+        metaDiv.innerHTML = `
+          <span class="dedupChannel">${escapeHtml(g.channel || "")}</span>
+          <span class="badge dupe">${g.items.length} 箇所に存在</span>
+          <button class="dedupPlayBtn">▶ 再生</button>
+        `;
+        metaDiv.querySelector(".dedupPlayBtn").onclick = () => { playVideo(g.playlist_id, g.video_id); };
+
+        const itemsDiv = document.createElement("div");
+        itemsDiv.className = "dedupItems";
+
+        for (const it of g.items) {
+          const lbl = document.createElement("label");
+          lbl.className = `dedupItemLabel ${it.is_duplicate ? "isDupe" : "isOrig"}`;
+
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.className = "dedupCb";
+          cb.dataset.pid = it.playlist_id || g.playlist_id;
+          cb.dataset.id = it.playlist_item_id;
+          cb.dataset.isDupe = it.is_duplicate ? "1" : "0";
+          cb.checked = it.is_duplicate;
+          cb.onchange = updateCount;
+
+          const plTag = document.createElement("span");
+          plTag.className = "dedupPlTag";
+          plTag.textContent = it.playlist_title || g.playlist_title || "リスト";
+          plTag.title = it.playlist_title || g.playlist_title || "";
+
+          const badge = document.createElement("span");
+          badge.className = `badge ${it.is_duplicate ? "badgeDupe" : "badgeOrig"}`;
+          badge.textContent = it.is_duplicate ? "重複" : "1件目 (保持)";
+
+          const pos = document.createElement("span");
+          pos.className = "dedupPos";
+          pos.textContent = `位置 #${it.position + 1}`;
+
+          lbl.append(cb, plTag, badge, pos);
+          itemsDiv.appendChild(lbl);
+        }
+
+        details.append(titleDiv, metaDiv, itemsDiv);
+        gBox.append(thumb, details);
+        listEl.appendChild(gBox);
+      }
     }
     updateCount();
   }
 
   $("dedupSelDupes").onclick = () => {
     listEl.querySelectorAll("input.dedupCb").forEach((cb) => {
-      cb.checked = (cb.dataset.isDupe === "1");
+      cb.checked = (cb.dataset.isDupe === "1" || cb.dataset.side === "B");
     });
     updateCount();
   };
@@ -1221,7 +1421,8 @@ async function openDedupModal(initialMode = "single", initialA = null, initialB 
   await renderDuplicates();
 }
 
-$("openDedup").onclick = () => { menu.hidden = true; openDedupModal(); };
+$("topDedupBtn").onclick = () => openDedupModal("compare");
+$("openDedup").onclick = () => { menu.hidden = true; openDedupModal("compare"); };
 $("openShorts").onclick = async () => {
   menu.hidden = true;
   if (!confirm("開いているプレイリストからショート動画（60秒以下）を一括削除しますか？\n※YouTube への反映は Push で行います。")) return;
