@@ -208,6 +208,7 @@ impl Playlist {
     }
 
     /// YouTube 側にリストが見つからないとき: 未作成の状態に戻す（全動画が「新規」になり、次の Push で作り直される）。
+    #[allow(dead_code)]
     pub fn forget_remote(&mut self) {
         self.remote_id = None;
         self.server.clear();
