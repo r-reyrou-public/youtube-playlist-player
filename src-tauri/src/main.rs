@@ -1120,7 +1120,8 @@ async fn exec_op(client: &YouTube, op: &Op, remote: &Option<String>, title: &str
                             break client.insert_item(rid, video_id, None).await.map(Some);
                         }
                         // 新規リスト作成直後のレプリケーション遅延対策（YouTube API の結果整合性により数秒間 404 が返る場合がある）
-                        Err(e) if e.contains("404") && retry < 3 => {
+                        // ただし動画自体が存在しないことが明示されている場合はリトライせず即時終了
+                        Err(e) if e.contains("404") && !e.to_lowercase().contains("video") && retry < 3 => {
                             retry += 1;
                             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
                             continue;
@@ -1274,6 +1275,35 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
                 let mut g = app.lock().await;
                 g.playlists.remove(&pid);
                 g.summaries.retain(|s| s.id != pid);
+                progress.0 += 1;
+                emit_progress(handle, "running", progress.0, progress.1, String::new(), 0);
+            }
+            // 404エラーが出た場合、自動的にプッシュリストから削除し次の項目に移る
+            Err(e) if e.contains("404") => {
+                eprintln!("[push] 404 Not Found for op {:?} on playlist {}: {}", op, pid, e);
+                let mut g = app.lock().await;
+                let rpid = g.resolve_id(&pid).to_string();
+                let key = if g.playlists.contains_key(&rpid) { rpid } else { pid.clone() };
+
+                // プレイリスト自体が見つからない場合、またはリスト削除操作の場合
+                if e.contains("playlistNotFound") || op == Op::DeletePlaylist {
+                    g.playlists.remove(&key);
+                    g.playlists.remove(&pid);
+                    g.summaries.retain(|s| s.id != pid && s.id != key);
+                } else {
+                    // アイテム単位の操作（Insert, Move, Delete）で404の場合
+                    if let Some(p) = g.playlists.get_mut(&key) {
+                        match &op {
+                            Op::Insert { item_id, .. } | Op::Move { item_id, .. } | Op::Delete { item_id } => {
+                                p.purge_item(item_id);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if !touched.contains(&pid) {
+                    touched.push(pid);
+                }
                 progress.0 += 1;
                 emit_progress(handle, "running", progress.0, progress.1, String::new(), 0);
             }
@@ -1740,5 +1770,44 @@ mod tests {
         let pl_obj = inner.playlists.get(target_id).or_else(|| inner.playlists.get(&pending_all[0].id));
         assert!(pl_obj.is_some());
         assert_eq!(pl_obj.unwrap().playlist_id, "PL_remote123");
+    }
+
+    #[test]
+    fn test_push_404_purges_item_and_advances_to_next() {
+        let mut inner = Inner::default();
+        let mut pl = Playlist::new("PL_test".into(), "Test".into(), vec![]);
+        // 2つのアイテムを追加（未反映）
+        pl.items.push(PlaylistItem {
+            playlist_item_id: "item-bad".into(),
+            video_id: "vid-bad".into(),
+            title: "Bad Video".into(),
+            is_new: true,
+            ..Default::default()
+        });
+        pl.items.push(PlaylistItem {
+            playlist_item_id: "item-good".into(),
+            video_id: "vid-good".into(),
+            title: "Good Video".into(),
+            is_new: true,
+            ..Default::default()
+        });
+        inner.playlists.insert("PL_test".into(), pl);
+        inner.summaries.push(make_summary("PL_test"));
+
+        // 未反映操作が2つある
+        let pl_mut = inner.playlists.get_mut("PL_test").unwrap();
+        let plan = pl_mut.plan();
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0], Op::Insert { item_id: "item-bad".into(), video_id: "vid-bad".into(), position: 0 });
+
+        // 最初のアイテムで404が発生したとシミュレート（purge_item を呼び出す）
+        pl_mut.purge_item("item-bad");
+
+        // 404のアイテムがリストから削除され、次の操作（item-good の追加）に移る
+        let new_plan = pl_mut.plan();
+        assert_eq!(new_plan.len(), 1);
+        assert_eq!(new_plan[0], Op::Insert { item_id: "item-good".into(), video_id: "vid-good".into(), position: 0 });
+        assert_eq!(pl_mut.items.len(), 1);
+        assert_eq!(pl_mut.items[0].playlist_item_id, "item-good");
     }
 }

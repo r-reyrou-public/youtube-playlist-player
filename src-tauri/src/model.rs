@@ -446,6 +446,14 @@ impl Playlist {
         Some(item)
     }
 
+    /// 404 等で YouTube 上に存在しないアイテムを、手元のリスト・サーバー同期リスト・削除待ちリストのすべてから完全に削除する。
+    pub fn purge_item(&mut self, item_id: &str) {
+        self.items.retain(|i| i.playlist_item_id != item_id);
+        self.server.retain(|id| id != item_id);
+        self.removed.retain(|i| i.playlist_item_id != item_id);
+        self.refresh();
+    }
+
     /// YouTube へ反映すべき操作を、実行順に返す。
     ///
     /// 1. 新規リストなら作成  2. 取り除いた動画の削除  3. 先頭から順に、新規動画は挿入、既存動画は位置の移動。
@@ -719,6 +727,27 @@ mod tests {
     #[test]
     fn empty_new_playlist_is_one_op() {
         assert_eq!(Playlist::new_local("local-1".into(), "N".into()).plan(), vec![Op::CreatePlaylist]);
+    }
+
+    #[test]
+    fn test_purge_item_removes_from_items_and_server() {
+        let mut pl = make(3);
+        assert_eq!(pl.items.len(), 3);
+        assert_eq!(pl.server.len(), 3);
+
+        // アイテム 1 を purge すると items, server, removed から完全に削除される
+        pl.purge_item("i1");
+        assert_eq!(pl.items.len(), 2);
+        assert_eq!(pl.server.len(), 2);
+        assert!(!pl.items.iter().any(|i| i.playlist_item_id == "i1"));
+        assert!(!pl.server.contains(&"i1".to_string()));
+        assert_eq!(pl.plan().len(), 0);
+
+        // 削除待ちになっているアイテムを purge
+        pl.remove_video("v2");
+        assert_eq!(pl.plan().len(), 1); // Delete i2
+        pl.purge_item("i2");
+        assert_eq!(pl.plan().len(), 0); // 完全に消えたので plan も 0
     }
 
     #[test]
