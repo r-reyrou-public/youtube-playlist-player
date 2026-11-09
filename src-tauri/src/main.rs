@@ -46,13 +46,18 @@ impl Inner {
                 if let Some(rid) = &pl.remote_id {
                     local_to_remote.push((id.clone(), rid.clone()));
                 }
+            } else if let Some(rid) = &pl.remote_id {
+                if rid != id {
+                    local_to_remote.push((id.clone(), rid.clone()));
+                }
             }
         }
         for (local_id, remote_id) in local_to_remote {
             self.id_aliases.insert(local_id.clone(), remote_id.clone());
             if let Some(mut pl) = self.playlists.remove(&local_id) {
                 pl.playlist_id = remote_id.clone();
-                self.playlists.entry(remote_id.clone()).or_insert(pl);
+                // 未反映の変更を持つ local 側を優先して格納
+                self.playlists.insert(remote_id.clone(), pl);
             }
             let has_remote = self.summaries.iter().any(|s| s.id == remote_id);
             if has_remote {
@@ -60,6 +65,13 @@ impl Inner {
             } else if let Some(s) = self.summaries.iter_mut().find(|s| s.id == local_id) {
                 s.id = remote_id;
                 s.is_new = false;
+            }
+        }
+
+        // 全ての pl.playlist_id をキーと一致させる
+        for (k, pl) in self.playlists.iter_mut() {
+            if pl.playlist_id != *k {
+                pl.playlist_id = k.clone();
             }
         }
 
@@ -200,8 +212,9 @@ fn restore(g: &mut Inner, d: quota::Deferred) {
     for s in d.summaries {
         g.upsert_summary(s);
     }
-    for p in d.playlists {
+    for mut p in d.playlists {
         let id = g.resolve_id(&p.playlist_id).to_string();
+        p.playlist_id = id.clone();
         g.playlists.insert(id, p);
     }
     g.cleanup_duplicate_summaries();
@@ -973,13 +986,20 @@ struct PendingPlaylist {
 }
 
 fn pending_lists(g: &Inner, ids: &Option<Vec<String>>) -> Vec<PendingPlaylist> {
+    let resolved_ids: Option<HashSet<String>> = ids.as_ref().map(|v| {
+        v.iter().map(|id| g.resolve_id(id).to_string()).collect()
+    });
     let mut out: Vec<PendingPlaylist> = g
         .playlists
-        .values()
-        .filter(|p| ids.as_ref().is_none_or(|v| v.contains(&p.playlist_id)))
-        .filter_map(|p| {
+        .iter()
+        .filter(|(k, p)| {
+            let pid = g.resolve_id(&p.playlist_id);
+            resolved_ids.as_ref().is_none_or(|set| set.contains(k.as_str()) || set.contains(pid))
+        })
+        .filter_map(|(k, p)| {
             let count = p.plan().len();
-            (count > 0).then(|| PendingPlaylist { id: p.playlist_id.clone(), title: p.title.clone(), count, deleting: p.deleted })
+            let id = g.resolve_id(k).to_string();
+            (count > 0).then(|| PendingPlaylist { id, title: p.title.clone(), count, deleting: p.deleted })
         })
         .collect();
     out.sort_by(|a, b| a.title.cmp(&b.title).then(a.id.cmp(&b.id)));
@@ -1057,8 +1077,8 @@ fn emit_progress(h: &AppHandle, state: &'static str, done: usize, total: usize, 
 /// 未反映の変更を、別日・次回起動時に回すために保存する（変更が無ければ保存ファイルを消す）。
 fn save_deferred(g: &Inner) {
     let playlists: Vec<Playlist> = g.playlists.values().filter(|p| !p.plan().is_empty()).cloned().collect();
-    let ids: HashSet<&str> = playlists.iter().map(|p| p.playlist_id.as_str()).collect();
-    let summaries = g.summaries.iter().filter(|s| ids.contains(s.id.as_str())).cloned().collect();
+    let ids: HashSet<String> = playlists.iter().map(|p| g.resolve_id(&p.playlist_id).to_string()).collect();
+    let summaries = g.summaries.iter().filter(|s| ids.contains(g.resolve_id(&s.id))).cloned().collect();
     quota::save_deferred(&quota::Deferred { playlists, summaries, next_local: g.next_local, next_item: g.next_item });
 }
 
@@ -1085,7 +1105,10 @@ async fn exec_op(client: &YouTube, op: &Op, remote: &Option<String>, title: &str
             },
             None => Ok(None),
         },
-        Op::Delete { item_id } => client.delete_item(item_id).await.map(|_| None),
+        Op::Delete { item_id } => match client.delete_item(item_id).await {
+            Err(e) if e.contains("404") => Ok(None),
+            r => r.map(|_| None),
+        },
         Op::Insert { video_id, position, .. } => match remote {
             Some(rid) => {
                 let mut retry = 0;
@@ -1154,8 +1177,9 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
         let next = {
             let g = app.lock().await;
             pending_lists(&g, ids).into_iter().find_map(|pl| {
-                let p = g.playlists.get(&pl.id)?;
-                Some((pl.id, p.plan().into_iter().next()?, p.remote_id.clone(), p.title.clone()))
+                let rid = g.resolve_id(&pl.id).to_string();
+                let p = g.playlists.get(&rid).or_else(|| g.playlists.get(&pl.id))?;
+                Some((rid, p.plan().into_iter().next()?, p.remote_id.clone(), p.title.clone()))
             })
         };
         let Some((mut pid, op, remote, title)) = next else { break Ok("done") };
@@ -1175,8 +1199,13 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
             if let Ok(fresh) = client.fetch_playlist(remote.as_deref().unwrap_or_default(), &title).await {
                 quota::add(((fresh.items.len() + 49) / 50).max(1) as u32);
                 let server_ids: Vec<String> = fresh.items.iter().map(|i| i.playlist_item_id.clone()).collect();
-                if let Some(p) = app.lock().await.playlists.get_mut(&pid) {
-                    p.set_server(server_ids);
+                {
+                    let mut g = app.lock().await;
+                    let rpid = g.resolve_id(&pid).to_string();
+                    let key = if g.playlists.contains_key(&rpid) { rpid } else { pid.clone() };
+                    if let Some(p) = g.playlists.get_mut(&key) {
+                        p.set_server(server_ids);
+                    }
                 }
                 progress.1 = pending_lists(&*app.lock().await, ids).iter().map(|p| p.count).sum::<usize>() + progress.0;
                 continue;
@@ -1195,8 +1224,10 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
                 quota::add(quota::OP_COST);
                 let mut g = app.lock().await;
                 if op == Op::DeletePlaylist {
+                    let rpid = g.resolve_id(&pid).to_string();
+                    g.playlists.remove(&rpid);
                     g.playlists.remove(&pid);
-                    g.summaries.retain(|s| s.id != pid);
+                    g.summaries.retain(|s| s.id != pid && s.id != rpid);
                 } else if op == Op::CreatePlaylist {
                     if let Some(new_rid) = result_id {
                         // 新しい YouTube プレイリストID に昇格（二重リスト生成を防止）
@@ -1224,8 +1255,12 @@ async fn push_inner(handle: &AppHandle, ids: &Option<Vec<String>>, mode: &str, p
                         }));
                         pid = new_rid;
                     }
-                } else if let Some(p) = g.playlists.get_mut(&pid) {
-                    p.apply(&op, result_id);
+                } else {
+                    let rpid = g.resolve_id(&pid).to_string();
+                    let key = if g.playlists.contains_key(&rpid) { rpid } else { pid.clone() };
+                    if let Some(p) = g.playlists.get_mut(&key) {
+                        p.apply(&op, result_id);
+                    }
                 }
                 if !touched.contains(&pid) {
                     touched.push(pid);
@@ -1570,6 +1605,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::PlaylistItem;
 
     fn make_summary(id: &str) -> PlaylistSummary {
         PlaylistSummary {
@@ -1650,5 +1686,59 @@ mod tests {
         inner.id_aliases.insert("temp-1".into(), "PL_final".into());
         assert_eq!(inner.resolve_id("local-1"), "PL_final");
         assert_eq!(inner.resolve_id("PL_final"), "PL_final");
+    }
+
+    #[test]
+    fn test_restore_retains_pending_plan_and_resolves_id_for_push() {
+        let mut inner = Inner::default();
+        let cache = quota::Deferred {
+            playlists: vec![],
+            summaries: vec![make_summary("PL_remote123")],
+            next_local: 1,
+            next_item: 1,
+        };
+        let mut deferred_pl = Playlist::new_local("local-1".into(), "My List".into());
+        deferred_pl.remote_id = Some("PL_remote123".into());
+        // 1件未反映の変更（Insert）を持たせる
+        deferred_pl.items.push(PlaylistItem {
+            playlist_item_id: "item-1".into(),
+            video_id: "vid123".into(),
+            title: "Test".into(),
+            original_position: 0,
+            current_position: 0,
+            thumbnail_url: String::new(),
+            channel: String::new(),
+            channel_id: String::new(),
+            is_new: true,
+            duration_secs: 100,
+            duration: "1:40".into(),
+        });
+
+        let deferred = quota::Deferred {
+            playlists: vec![deferred_pl],
+            summaries: vec![],
+            next_local: 1,
+            next_item: 1,
+        };
+
+        restore(&mut inner, cache);
+        restore(&mut inner, deferred);
+
+        // 全体Pushの pending_lists
+        let pending_all = pending_lists(&inner, &None);
+        assert_eq!(pending_all.len(), 1);
+        assert_eq!(pending_all[0].id, "PL_remote123");
+        assert_eq!(pending_all[0].count, 1);
+
+        // 指定Push（エディタ画面からのPush: ["PL_remote123"]）
+        let pending_specific = pending_lists(&inner, &Some(vec!["PL_remote123".into()]));
+        assert_eq!(pending_specific.len(), 1);
+        assert_eq!(pending_specific[0].id, "PL_remote123");
+
+        // push_inner での探索
+        let target_id = inner.resolve_id(&pending_all[0].id);
+        let pl_obj = inner.playlists.get(target_id).or_else(|| inner.playlists.get(&pending_all[0].id));
+        assert!(pl_obj.is_some());
+        assert_eq!(pl_obj.unwrap().playlist_id, "PL_remote123");
     }
 }
